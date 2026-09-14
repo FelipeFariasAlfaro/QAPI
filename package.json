@@ -1,0 +1,99 @@
+{
+  "name": "qa-pi",
+  "displayName": "QAPI - Agente de inteligencia artificial",
+  "description": "Agente de inteligencia artificial especializado en QA y automatización, con contexto del proyecto abierto.",
+  "version": "1.0.0",
+  "publisher": "centyc",
+  "author": "Felipe Farias Alfaro",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FelipeFariasAlfaro/QAPI.git"
+  },
+  "homepage": "https://github.com/FelipeFariasAlfaro/QAPI#readme",
+  "bugs": {
+    "url": "https://github.com/FelipeFariasAlfaro/QAPI/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Testing",
+    "Other"
+  ],
+  "keywords": [
+    "qa",
+    "testing",
+    "ai",
+    "chat",
+    "behave",
+    "playwright",
+    "cypress",
+    "selenium"
+  ],
+  "activationEvents": [
+    "onView:qa-pi.chat"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "media/icon.png",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qa-pi",
+          "title": "QAPI",
+          "icon": "media/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "qa-pi": [
+        {
+          "id": "qa-pi.chat",
+          "name": "QAPI",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "qa-pi.openChat",
+        "title": "QAPI: Abrir agente",
+        "category": "QAPI"
+      },
+      {
+        "command": "qa-pi.openSettings",
+        "title": "QAPI: Configuración",
+        "category": "QAPI"
+      },
+      {
+        "command": "qa-pi.reindex",
+        "title": "QAPI: Reindexar proyecto",
+        "category": "QAPI"
+      },
+      {
+        "command": "qa-pi.clearChat",
+        "title": "QAPI: Limpiar conversación",
+        "category": "QAPI"
+      },
+      {
+        "command": "qa-pi.clearInvestigationMemory",
+        "title": "QAPI: Limpiar memoria automática",
+        "category": "QAPI"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p src/webview/tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0"
+  }
+}
