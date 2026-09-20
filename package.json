@@ -2,7 +2,7 @@
   "name": "qa-pi",
   "displayName": "QAPI - Agente de inteligencia artificial",
   "description": "Agente de inteligencia artificial especializado en QA y automatización, con contexto del proyecto abierto.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "centyc",
   "author": "Felipe Farias Alfaro",
   "license": "MIT",
@@ -88,7 +88,11 @@
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p src/webview/tsconfig.json"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p src/webview/tsconfig.json",
+    "package": "vsce package --out qa-pi.vsix",
+    "publish:vsce": "vsce publish --packagePath qa-pi.vsix",
+    "publish:ovsx": "ovsx publish qa-pi.vsix",
+    "release": "npm run package && npm run publish:vsce && npm run publish:ovsx"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

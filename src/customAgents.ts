@@ -27,6 +27,7 @@ export const BUILT_IN_AGENTS: CustomAgentDefinition[] = [
     outputMode: 'file',
     outputPathTemplate: 'docs/negocio/{name}.md',
     builtIn: true,
+    inputMode: 'files',
     instructions: `Eres un analista de negocio. A partir de los archivos .feature seleccionados,
 redacta un documento Markdown para personas no técnicas (producto, negocio, QA funcional):
 1. Resumen del área funcional cubierta.
@@ -37,77 +38,20 @@ redacta un documento Markdown para personas no técnicas (producto, negocio, QA 
 No inventes reglas que no estén respaldadas por el contenido leído.`,
   },
   {
-    slug: 'checklist-riesgos',
-    name: 'Checklist de riesgos de release',
-    description: 'Analiza el Git diff y genera un checklist de riesgos y pruebas de regresión antes de liberar.',
-    icon: '⚠️',
-    outputMode: 'chat',
-    builtIn: true,
-    instructions: `Eres un QA lead evaluando el riesgo de una release. Usa el contexto del proyecto,
-el Git diff y los archivos que te indiquen (si los hay) para producir:
-1. Nivel de riesgo general (bajo/medio/alto) con justificación breve.
-2. Checklist de verificaciones manuales antes de liberar.
-3. Pruebas de regresión prioritarias y por qué.
-4. Áreas del sistema no cubiertas por pruebas automatizadas que deberían revisarse.
-Sé concreto y basado en evidencia real del proyecto, no genérico.`,
-  },
-  {
     slug: 'generador-casos-prueba',
     name: 'Generador de casos de prueba',
-    description: 'Lee especificaciones o código seleccionado y propone casos de prueba en una tabla.',
+    description: 'Pega texto libre o adjunta un archivo (requisito, historia, documento) y genera .feature con casos de prueba.',
     icon: '🧪',
+    inputMode: 'freeText',
     outputMode: 'file',
-    outputPathTemplate: 'docs/casos-prueba/{name}.md',
+    outputPathTemplate: 'features/{name}.feature',
     builtIn: true,
-    instructions: `Eres un diseñador de casos de prueba. A partir de los archivos seleccionados,
-genera una tabla Markdown de casos de prueba con columnas: ID, Título, Precondición,
-Pasos, Resultado esperado, Prioridad (alta/media/baja), Tipo (positivo/negativo/límite).
-Cubre camino feliz, casos límite y casos negativos. No dupliques casos equivalentes.`,
-  },
-  {
-    slug: 'revision-accesibilidad',
-    name: 'Revisión de accesibilidad',
-    description: 'Analiza componentes de UI seleccionados y reporta problemas de accesibilidad (WCAG).',
-    icon: '♿',
-    inputGlob: '**/*.{tsx,jsx,vue,html}',
-    outputMode: 'file',
-    outputPathTemplate: 'docs/accesibilidad/{name}.md',
-    builtIn: true,
-    instructions: `Eres un auditor de accesibilidad. Revisa los archivos de UI seleccionados y reporta,
-en Markdown, problemas concretos agrupados por severidad (alta/media/baja) con referencia a
-criterios WCAG 2.1 cuando aplique: contraste, etiquetas ARIA, foco de teclado, textos alternativos,
-estructura semántica. Para cada hallazgo indica archivo, línea aproximada y corrección sugerida.
-Aclara al inicio que esto es un análisis estático y no reemplaza pruebas con lectores de pantalla
-ni validación manual con personas usuarias.`,
-  },
-  {
-    slug: 'documentador-api',
-    name: 'Documentador de API',
-    description: 'Lee rutas/controladores seleccionados y genera documentación de endpoints en Markdown.',
-    icon: '🔌',
-    inputGlob: '**/*.{ts,js,py,java}',
-    outputMode: 'file',
-    outputPathTemplate: 'docs/api/{name}.md',
-    builtIn: true,
-    instructions: `Eres un documentador técnico de APIs. A partir del código seleccionado, extrae los
-endpoints reales (método, ruta, parámetros, body, respuestas y códigos de estado) y documéntalos
-en Markdown, agrupados por recurso. No inventes endpoints ni parámetros que no estén en el código.
-Si detectas autenticación o validaciones relevantes, menciónalas por endpoint.`,
-  },
-  {
-    slug: 'auditor-dependencias',
-    name: 'Auditor de dependencias',
-    description: 'Revisa manifiestos de dependencias y señala riesgos de versiones, licencias u obsolescencia.',
-    icon: '📦',
-    inputGlob: '**/{package.json,requirements.txt,pom.xml,build.gradle,Gemfile,go.mod}',
-    outputMode: 'chat',
-    builtIn: true,
-    instructions: `Eres un auditor de dependencias. Revisa los manifiestos seleccionados y reporta:
-1. Dependencias con versiones no fijadas (rangos abiertos) y el riesgo que implican.
-2. Dependencias que parecen obsoletas o sin mantenimiento evidente por el nombre/versión.
-3. Cualquier paquete con nombre sospechoso de typosquatting.
-4. Recomendaciones concretas de siguiente paso (fijar versión, revisar, reemplazar).
-No accedas a internet ni asumas datos que no puedas justificar con el contenido leído.`,
+    instructions: `Eres un diseñador de casos de prueba especializado en BDD. A partir del texto o
+documento entregado (requisito, historia de usuario, especificación funcional, etc.), genera un
+archivo .feature en Gherkin con: Feature, Background si aplica, y Scenarios que cubran camino feliz,
+casos límite y casos negativos. Usa el idioma y dialecto Gherkin (palabras clave) que ya use el
+proyecto si hay .feature existentes; si no hay referencia, usa español neutro. No inventes reglas
+de negocio que no estén respaldadas por el texto entregado.`,
   },
 ]
 
@@ -206,6 +150,7 @@ export async function buildRunInstruction(
   agent: CustomAgentDefinition,
   index: ProjectIndex,
   selectedFiles: string[],
+  freeText?: string,
 ): Promise<string> {
   const sections = [
     `AGENTE PERSONALIZADO: ${agent.name}`,
@@ -227,6 +172,9 @@ export async function buildRunInstruction(
     if (blocks.length) sections.push(`ARCHIVOS DE ENTRADA SELECCIONADOS (${blocks.length}):\n${blocks.join('\n\n')}`)
   }
 
+  const trimmedFreeText = (freeText || '').trim().slice(0, MAX_TOTAL_CHARS)
+  if (trimmedFreeText) sections.push(`CONTENIDO DE ENTRADA (texto pegado o archivo adjunto):\n${trimmedFreeText}`)
+
   if (agent.outputMode === 'file') {
     const outputPath = resolveOutputPath(agent, selectedFiles)
     sections.push(
@@ -244,7 +192,7 @@ function resolveOutputPath(agent: CustomAgentDefinition, selectedFiles: string[]
   const template = agent.outputPathTemplate || 'docs/{name}.md'
   const baseName = selectedFiles.length === 1
     ? fileBaseName(selectedFiles[0])
-    : slugifyAgentName(agent.name)
+    : `${slugifyAgentName(agent.name)}-${Date.now().toString(36)}`
   const date = new Date().toISOString().slice(0, 10)
   return template.replace('{name}', baseName).replace('{date}', date)
 }
@@ -259,13 +207,15 @@ function normalizeAgent(candidate: any, fallbackSlug: string): CustomAgentDefini
   const instructions = String(candidate?.instructions || '').trim().slice(0, 8_000)
   if (!name || !instructions) return undefined
   const outputMode: CustomAgentDefinition['outputMode'] = candidate?.outputMode === 'file' ? 'file' : 'chat'
+  const inputMode: CustomAgentDefinition['inputMode'] = candidate?.inputMode === 'freeText' ? 'freeText' : 'files'
   return {
     slug: slugifyAgentName(String(candidate?.slug || fallbackSlug)),
     name,
     description: String(candidate?.description || '').trim().slice(0, 300),
     icon: candidate?.icon ? String(candidate.icon).slice(0, 8) : undefined,
     instructions,
-    inputGlob: candidate?.inputGlob ? String(candidate.inputGlob).trim().slice(0, 200) : undefined,
+    inputMode,
+    inputGlob: inputMode === 'files' && candidate?.inputGlob ? String(candidate.inputGlob).trim().slice(0, 200) : undefined,
     outputMode,
     outputPathTemplate: outputMode === 'file'
       ? String(candidate?.outputPathTemplate || 'docs/{name}.md').trim().slice(0, 200)

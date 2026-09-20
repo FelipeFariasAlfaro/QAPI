@@ -11,6 +11,8 @@
   --qp-green: 46, 173, 91;
   --qp-amber: 224, 168, 42;
   --qp-red: 224, 74, 92;
+  /* Fondo de los bloques de código: casi negro para máximo contraste. */
+  --qp-code-bg: 12, 10, 18;
   --qp-font: 13px;
 }
 body.theme-light {
@@ -20,6 +22,75 @@ body.theme-light {
   --qp-border: 218, 210, 232;
   --qp-fg: 34, 26, 48;
   --qp-fg2: 110, 100, 130;
+  --qp-code-bg: 30, 27, 38;
+}
+
+/* ── Temas opcionales ─────────────────────────────────────────────────────── */
+body.theme-midnight {
+  --qp-accent: 88, 101, 242;
+  --qp-accent2: 130, 142, 255;
+  --qp-bg: 10, 12, 22;
+  --qp-bg2: 16, 19, 32;
+  --qp-panel: 24, 28, 44;
+  --qp-border: 40, 46, 68;
+  --qp-fg: 226, 231, 245;
+  --qp-fg2: 138, 146, 172;
+  --qp-code-bg: 6, 8, 16;
+}
+body.theme-ocean {
+  --qp-accent: 20, 140, 170;
+  --qp-accent2: 46, 184, 210;
+  --qp-bg: 11, 24, 32;
+  --qp-bg2: 16, 33, 44;
+  --qp-panel: 22, 44, 58;
+  --qp-border: 34, 64, 80;
+  --qp-fg: 220, 236, 240;
+  --qp-fg2: 128, 158, 168;
+  --qp-code-bg: 6, 16, 22;
+}
+body.theme-forest {
+  --qp-accent: 56, 142, 78;
+  --qp-accent2: 96, 186, 112;
+  --qp-bg: 14, 22, 16;
+  --qp-bg2: 20, 32, 23;
+  --qp-panel: 28, 44, 32;
+  --qp-border: 44, 66, 48;
+  --qp-fg: 224, 236, 224;
+  --qp-fg2: 138, 164, 140;
+  --qp-code-bg: 8, 15, 10;
+}
+body.theme-sunset {
+  --qp-accent: 214, 90, 66;
+  --qp-accent2: 240, 140, 78;
+  --qp-bg: 26, 16, 20;
+  --qp-bg2: 38, 24, 28;
+  --qp-panel: 52, 33, 38;
+  --qp-border: 78, 52, 56;
+  --qp-fg: 244, 228, 224;
+  --qp-fg2: 178, 146, 142;
+  --qp-code-bg: 18, 10, 13;
+}
+body.theme-mono {
+  --qp-accent: 120, 120, 130;
+  --qp-accent2: 170, 170, 182;
+  --qp-bg: 18, 18, 20;
+  --qp-bg2: 26, 26, 30;
+  --qp-panel: 36, 36, 40;
+  --qp-border: 56, 56, 62;
+  --qp-fg: 232, 232, 236;
+  --qp-fg2: 148, 148, 158;
+  --qp-code-bg: 10, 10, 12;
+}
+body.theme-solarized {
+  --qp-accent: 38, 139, 210;
+  --qp-accent2: 42, 161, 152;
+  --qp-bg: 0, 43, 54;
+  --qp-bg2: 7, 54, 66;
+  --qp-panel: 15, 66, 79;
+  --qp-border: 40, 82, 94;
+  --qp-fg: 224, 232, 224;
+  --qp-fg2: 131, 148, 150;
+  --qp-code-bg: 0, 30, 38;
 }
 * { box-sizing: border-box; }
 html, body {
@@ -86,6 +157,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .spacer { margin-left: auto; }
 .icon-btn { padding: 3px 7px; border: 0; border-radius: 6px; background: none; color: rgb(var(--qp-fg2)); font-size: 11px; cursor: pointer; }
 .icon-btn:hover { color: rgb(var(--qp-accent2)); background: rgba(var(--qp-accent), .1); }
+.font-controls { display: flex; align-items: center; gap: 2px; }
+.font-btn { min-width: 24px; padding: 3px 5px; border: 1px solid rgb(var(--qp-border)); border-radius: 6px; background: none; color: rgb(var(--qp-fg2)); font-family: inherit; line-height: 1; cursor: pointer; }
+.font-btn:hover { color: rgb(var(--qp-accent2)); border-color: rgb(var(--qp-accent)); background: rgba(var(--qp-accent), .1); }
+.font-btn:disabled { opacity: .4; cursor: not-allowed; }
+.font-btn .font-minus { font-size: 10px; }
+.font-btn .font-plus { font-size: 14px; }
 .quick-actions { display: flex; gap: 5px; padding: 5px 9px; overflow-x: auto; border-bottom: 1px solid rgb(var(--qp-border)); scrollbar-width: thin; }
 .quick-actions .btn { flex: 0 0 auto; }
 .ctx { padding: 5px 9px; border-bottom: 1px solid rgb(var(--qp-border)); background: rgb(var(--qp-bg2)); }
@@ -119,7 +196,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .bubble blockquote { margin: 8px 0; padding: 4px 10px; border-left: 3px solid rgb(var(--qp-accent)); color: rgb(var(--qp-fg2)); }
 .bubble a { color: rgb(var(--qp-accent2)); }
 .bubble code { padding: 1px 4px; border-radius: 4px; background: rgba(var(--qp-accent), .14); font-family: 'JetBrains Mono', 'Fira Code', monospace; }
-.message-content > pre { max-width: 100%; padding: 9px; overflow-x: auto; border: 1px solid rgb(var(--qp-border)); border-radius: 7px; background: rgb(var(--qp-bg2)); }
+.message-content > pre { max-width: 100%; padding: 9px; overflow-x: auto; border: 1px solid rgb(var(--qp-border)); border-radius: 7px; background: rgb(var(--qp-code-bg)); }
 .message-content > pre code { padding: 0; background: none; }
 .section-label { color: rgb(var(--qp-fg2)); font-size: 10px; font-weight: 700; letter-spacing: .02em; }
 .mode-badge { display: inline-block; margin: 0; padding: 1px 6px; border: 1px solid rgb(var(--qp-border)); border-radius: 999px; color: rgb(var(--qp-fg2)); font-size: 9px; font-weight: 700; }
@@ -173,7 +250,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .diff-hunk { border-top: 1px solid rgb(var(--qp-border)); }
 .hunk-header { display: flex; align-items: center; gap: 6px; padding: 4px 7px; background: rgba(var(--qp-accent), .07); }
 .hunk-label { min-width: 0; overflow: hidden; color: rgb(var(--qp-fg2)); font-family: 'JetBrains Mono', monospace; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
-.diff-code { max-height: 260px; overflow: auto; background: rgb(var(--qp-bg)); font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10px; line-height: 1.45; scrollbar-width: thin; }
+.diff-code { max-height: 260px; overflow: auto; background: rgb(var(--qp-code-bg)); font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10px; line-height: 1.45; scrollbar-width: thin; }
 .diff-line { min-width: max-content; display: grid; grid-template-columns: 38px 18px minmax(0, 1fr); }
 .diff-line.old { background: rgba(var(--qp-red), .14); color: rgb(var(--qp-red)); }
 .diff-line.new { background: rgba(var(--qp-green), .14); color: rgb(var(--qp-green)); }
@@ -215,9 +292,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-file-row .check-label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'JetBrains Mono', monospace; }
 .agent-run-row { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .agent-selected-count { color: rgb(var(--qp-fg2)); font-size: 9.5px; }
-.agent-editor { flex: 1; min-height: 0; overflow-y: auto; padding: 9px; max-width: 560px; margin: 0 auto; scrollbar-width: thin; }
+.agent-editor { flex: 1; min-height: 0; overflow-y: auto; padding: 9px; max-width: 100%; scrollbar-width: thin; }
 .agent-editor h3 { margin: 0 0 10px; }
 .agent-editor textarea.memory-editor { min-height: 160px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10.5px; }
+.agent-pick-row { display: flex; }
+.agent-freetext textarea.memory-editor { min-height: 90px; margin-bottom: 6px; }
+.agent-file-attach { font-size: 10px; }
+.agent-modal-overlay { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, .55); }
+.agent-modal { width: min(100%, 480px); max-height: min(100%, 520px); display: flex; flex-direction: column; padding: 12px; border: 1px solid rgb(var(--qp-border)); border-radius: 10px; background: rgb(var(--qp-bg2)); box-shadow: 0 16px 40px rgba(0, 0, 0, .4); }
+.agent-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.agent-modal-header h3 { margin: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-modal-filter { width: 100%; margin-bottom: 8px; padding: 5px 7px; border: 1px solid rgb(var(--qp-border)); border-radius: 6px; outline: none; background: rgb(var(--qp-bg)); color: rgb(var(--qp-fg)); font-size: 10.5px; }
+.agent-modal-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; scrollbar-width: thin; }
+.agent-modal-list .check-label span { font-family: 'JetBrains Mono', monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-modal-actions { margin-top: 8px; justify-content: flex-end; }
 
 /* Specs */
 .spec-item { margin-top: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; border: 1px solid rgb(var(--qp-border)); border-radius: 7px; background: rgb(var(--qp-bg2)); }
@@ -252,7 +340,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .run-running .run-status { color: rgb(var(--qp-amber)); }
 .run summary code { min-width: 0; overflow: hidden; padding: 0; background: none; color: rgb(var(--qp-fg)); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .run-duration { color: rgb(var(--qp-fg2)); font-size: 9px; white-space: nowrap; }
-.run-output { max-height: 250px; margin: 0; padding: 8px; overflow: auto; border-top: 1px solid rgb(var(--qp-border)); border-radius: 0; background: rgb(var(--qp-bg)); color: rgb(var(--qp-fg)); font-family: 'JetBrains Mono', monospace; font-size: 10px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.run-output { max-height: 250px; margin: 0; padding: 8px; overflow: auto; border-top: 1px solid rgb(var(--qp-border)); border-radius: 0; background: rgb(var(--qp-code-bg)); color: rgb(var(--qp-fg)); font-family: 'JetBrains Mono', monospace; font-size: 10px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 .run-actions { padding: 6px 7px; border-top: 1px solid rgb(var(--qp-border)); }
 
 /* Sobre Centyc */
@@ -301,7 +389,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .status-warn { color: rgb(var(--qp-amber)); font-size: 10.5px; }
 .memory-editor, .json-editor { width: 100%; resize: vertical; padding: 7px 8px; border: 1px solid rgb(var(--qp-border)); border-radius: 6px; outline: none; background: rgb(var(--qp-bg)); color: rgb(var(--qp-fg)); line-height: 1.45; }
 .memory-editor { min-height: 85px; margin-bottom: 7px; font-family: inherit; }
-.json-editor { min-height: 125px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10.5px; white-space: pre; overflow-x: auto; }
+.json-editor { min-height: 125px; background: rgb(var(--qp-code-bg)); font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10.5px; white-space: pre; overflow-x: auto; }
 .memory-editor:focus, .json-editor:focus { border-color: rgb(var(--qp-accent)); }
 .checkpoint-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgb(var(--qp-border)); }
 .checkpoint-item:last-child { border-bottom: 0; }

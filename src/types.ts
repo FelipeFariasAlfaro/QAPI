@@ -4,6 +4,20 @@ export type ProviderId = 'gemini' | 'claude' | 'openai' | 'ollama'
 export type AgentMode = 'chat' | 'plan'
 export type UiLanguage = 'es' | 'en'
 
+/**
+ * Temas visuales de la interfaz. `dark`/`light` son los base; el resto son
+ * estilos opcionales que redefinen la paleta de variables CSS.
+ */
+export type UiTheme =
+  | 'dark'
+  | 'light'
+  | 'midnight'
+  | 'ocean'
+  | 'forest'
+  | 'sunset'
+  | 'mono'
+  | 'solarized'
+
 export interface ProviderConfig {
   provider: ProviderId
   apiKey?: string
@@ -40,7 +54,7 @@ export interface Settings {
   provider: ProviderConfig
   mcpJson: string
   mcpEnabled: Record<string, boolean>
-  theme: 'dark' | 'light'
+  theme: UiTheme
   fontSize: number
   configured: boolean
   /** Ejecuta un comando detectado después de aplicar cambios. */
@@ -172,6 +186,8 @@ export interface HookDefinition {
 }
 
 export type CustomAgentOutputMode = 'chat' | 'file'
+/** "files": elige archivos del proyecto por glob. "freeText": pega texto o adjunta un archivo local. */
+export type CustomAgentInputMode = 'files' | 'freeText'
 
 export interface CustomAgentDefinition {
   /** Nombre de archivo sin extensión; identifica al agente. */
@@ -181,12 +197,13 @@ export interface CustomAgentDefinition {
   /** Icono/emoji corto para la tarjeta. */
   icon?: string
   instructions: string
-  /** Glob para preseleccionar archivos de entrada (p. ej. "**\/*.feature"). */
+  inputMode?: CustomAgentInputMode
+  /** Glob para preseleccionar archivos de entrada (p. ej. "**\/*.feature"); usado cuando inputMode es "files". */
   inputGlob?: string
   outputMode: CustomAgentOutputMode
   /** Plantilla de ruta de salida cuando outputMode es "file"; admite {name} y {date}. */
   outputPathTemplate?: string
-  /** true para los 6 agentes incluidos con la extensión (no editables, sí duplicables). */
+  /** true para los agentes incluidos con la extensión (no editables, sí duplicables). */
   builtIn?: boolean
 }
 
@@ -291,7 +308,7 @@ export type ToHost =
   | { type: 'refreshCustomAgents' }
   | { type: 'saveCustomAgent'; agent: CustomAgentDefinition; previousSlug?: string }
   | { type: 'deleteCustomAgent'; slug: string }
-  | { type: 'runCustomAgent'; slug: string; files: string[] }
+  | { type: 'runCustomAgent'; slug: string; files: string[]; freeText?: string }
   | { type: 'suggestAgentFiles'; glob: string }
   | { type: 'openSpecDocument'; slug: string; kind: SpecDocumentKind }
   | { type: 'runSpecTask'; slug: string; taskId: string }

@@ -7,3 +7,5 @@ tsconfig.json
 .gitignore
 .kiro/**
 semantic-review/**
+.github/**
+*.vsix

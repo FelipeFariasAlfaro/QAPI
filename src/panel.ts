@@ -312,7 +312,7 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
           const agents = await listCustomAgents()
           const agent = agents.find((item) => item.slug === message.slug)
           if (!agent) throw new Error(ui(language, 'El agente ya no está disponible.', 'The agent is no longer available.'))
-          const instruction = await buildRunInstruction(agent, this.index, message.files)
+          const instruction = await buildRunInstruction(agent, this.index, message.files, message.freeText)
           await this.onSend(instruction, 'chat')
           break
         }

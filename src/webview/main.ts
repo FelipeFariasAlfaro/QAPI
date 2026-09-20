@@ -3,7 +3,7 @@ import { renderMarkdown } from './markdown'
 import type {
   AgentMode, ChatTurn, Checkpoint, ContextUsage, CustomAgentDefinition, CustomAgentOutputMode, DiffHunk,
   ExecutionRun, FileProposal, McpValidation, ProviderId, Settings, SpecPhase, SpecSummary, SpecTask, ToWebview,
-  TraceabilitySummary, UiLanguage, VerificationMode,
+  TraceabilitySummary, UiLanguage, UiTheme, VerificationMode,
 } from '../types'
 
 declare function acquireVsCodeApi(): {
@@ -19,6 +19,22 @@ const PROVIDERS: { id: ProviderId; label: string; needsKey: boolean }[] = [
   { id: 'openai', label: 'OpenAI', needsKey: true },
   { id: 'ollama', label: 'Ollama (local)', needsKey: false },
 ]
+
+// El primer valor es el tema base; los siguientes son estilos opcionales.
+const THEME_OPTIONS: [UiTheme, string][] = [
+  ['dark', 'Oscuro'],
+  ['light', 'Claro'],
+  ['midnight', 'Medianoche'],
+  ['ocean', 'Océano'],
+  ['forest', 'Bosque'],
+  ['sunset', 'Atardecer'],
+  ['mono', 'Monocromo'],
+  ['solarized', 'Solarizado'],
+]
+const THEME_CLASSES = THEME_OPTIONS.map(([value]) => `theme-${value}`)
+
+const FONT_MIN = 9
+const FONT_MAX = 18
 
 type TabId = 'chat' | 'agents' | 'settings' | 'centyc'
 type SelectionState = Record<string, Record<string, string[]>>
@@ -62,6 +78,8 @@ let customAgents: CustomAgentDefinition[] = []
 let agentFileSuggestions: string[] = []
 let agentFileFilter: Record<string, string> = {}
 let agentSelectedFiles: Record<string, string[]> = saved.agentSelectedFiles || {}
+let agentFreeText: Record<string, string> = {}
+let fileModalAgentSlug: string | null = null
 let editingAgent: CustomAgentDefinition | null = null
 let editingAgentPreviousSlug: string | undefined
 let refSuggestions: string[] = []
@@ -233,7 +251,9 @@ window.addEventListener('message', (ev) => {
 function applyTheme() {
   if (!settings) return
   document.documentElement.lang = settings.language || 'es'
-  document.body.classList.toggle('theme-light', settings.theme === 'light')
+  document.body.classList.remove(...THEME_CLASSES)
+  // 'dark' es la paleta base de :root; el resto se activa con su clase.
+  if (settings.theme && settings.theme !== 'dark') document.body.classList.add(`theme-${settings.theme}`)
   document.documentElement.style.setProperty('--qp-font', `${settings.fontSize}px`)
 }
 
@@ -320,6 +340,7 @@ function chatView(): HTMLElement {
   indexBadge.textContent = indexing ? 'Indexando…' : `${indexedFiles} archivos`
   header.appendChild(indexBadge)
   header.appendChild(div('spacer'))
+  header.appendChild(fontControls())
   header.appendChild(iconBtn('Nueva conversación', 'Nueva', () => {
     selections = {}
     saveLocalState()
@@ -430,6 +451,37 @@ function sendText(text: string, messageMode: AgentMode) {
   post({ type: 'sendMessage', text, mode: messageMode })
 }
 
+/** Botones -a/+A para ajustar el tamaño de fuente desde el encabezado del chat. */
+function fontControls(): HTMLElement {
+  const wrap = div('font-controls')
+  const current = settings?.fontSize ?? 13
+  const minus = document.createElement('button')
+  minus.className = 'font-btn'
+  minus.title = tr('Reducir tamaño de fuente', 'Decrease font size')
+  minus.innerHTML = '<span class="font-minus">a</span>'
+  minus.disabled = current <= FONT_MIN
+  minus.onclick = () => changeFontSize(-1)
+  const plus = document.createElement('button')
+  plus.className = 'font-btn'
+  plus.title = tr('Aumentar tamaño de fuente', 'Increase font size')
+  plus.innerHTML = '<span class="font-plus">A</span>'
+  plus.disabled = current >= FONT_MAX
+  plus.onclick = () => changeFontSize(1)
+  wrap.appendChild(minus)
+  wrap.appendChild(plus)
+  return wrap
+}
+
+function changeFontSize(delta: number) {
+  if (!settings) return
+  const next = Math.max(FONT_MIN, Math.min(FONT_MAX, (settings.fontSize || 13) + delta))
+  if (next === settings.fontSize) return
+  settings = { ...settings, fontSize: next }
+  document.documentElement.style.setProperty('--qp-font', `${next}px`)
+  post({ type: 'saveSettings', settings: { fontSize: next } })
+  render()
+}
+
 // ── Agentes personalizados ────────────────────────────────────────────────
 
 function agentsView(): HTMLElement {
@@ -463,6 +515,12 @@ function agentsView(): HTMLElement {
   }
   for (const agent of customAgents) list.appendChild(agentCard(agent))
   view.appendChild(list)
+
+  if (fileModalAgentSlug) {
+    const agent = customAgents.find((item) => item.slug === fileModalAgentSlug)
+    if (agent) view.appendChild(agentFileModal(agent))
+    else fileModalAgentSlug = null
+  }
   return view
 }
 
@@ -493,47 +551,109 @@ function agentCard(agent: CustomAgentDefinition): HTMLElement {
   description.textContent = agent.description || tr('Sin descripción.', 'No description.')
   card.appendChild(description)
 
-  if (agent.inputGlob) {
-    card.appendChild(agentFilePicker(agent))
+  const isFilesMode = (agent.inputMode || 'files') === 'files' && agent.inputGlob
+  const isFreeTextMode = agent.inputMode === 'freeText'
+
+  if (isFilesMode) {
+    const selectedCount = (agentSelectedFiles[agent.slug] || []).length
+    const pickRow = div('agent-pick-row')
+    pickRow.appendChild(button(
+      selectedCount
+        ? tr(`${selectedCount} archivo(s) seleccionado(s)`, `${selectedCount} file(s) selected`)
+        : tr('Seleccionar archivos…', 'Select files…'),
+      'btn btn-ghost btn-sm',
+      () => {
+        fileModalAgentSlug = agent.slug
+        agentFileFilter[agent.slug] = ''
+        post({ type: 'suggestAgentFiles', glob: agent.inputGlob || '' })
+        render()
+      },
+    ))
+    card.appendChild(pickRow)
+  }
+
+  if (isFreeTextMode) {
+    card.appendChild(agentFreeTextInput(agent))
   }
 
   const runRow = div('agent-run-row')
-  const selectedCount = (agentSelectedFiles[agent.slug] || []).length
-  if (agent.inputGlob && selectedCount) {
-    const count = div('agent-selected-count')
-    count.textContent = tr(`${selectedCount} archivo(s) seleccionado(s)`, `${selectedCount} file(s) selected`)
-    runRow.appendChild(count)
-  }
+  const selectedFiles = agentSelectedFiles[agent.slug] || []
+  const freeText = agentFreeText[agent.slug] || ''
+  const canRun = isFreeTextMode ? Boolean(freeText.trim()) : (isFilesMode ? selectedFiles.length > 0 : true)
   const runBtn = button(tr('Ejecutar', 'Run'), 'btn btn-primary btn-sm', () => {
     tab = 'chat'
-    post({ type: 'runCustomAgent', slug: agent.slug, files: agentSelectedFiles[agent.slug] || [] })
+    post({ type: 'runCustomAgent', slug: agent.slug, files: selectedFiles, freeText: freeText || undefined })
     render()
   })
-  runBtn.disabled = thinking || Boolean(agent.inputGlob && !selectedCount)
+  runBtn.disabled = thinking || !canRun
   runRow.appendChild(runBtn)
   card.appendChild(runRow)
   return card
 }
 
-function agentFilePicker(agent: CustomAgentDefinition): HTMLElement {
-  const wrap = div('agent-file-picker')
+function agentFreeTextInput(agent: CustomAgentDefinition): HTMLElement {
+  const wrap = div('agent-freetext')
+  const textarea = document.createElement('textarea')
+  textarea.className = 'memory-editor'
+  textarea.placeholder = tr(
+    'Pega el texto, requisito o especificación aquí…',
+    'Paste the text, requirement, or specification here…',
+  )
+  textarea.value = agentFreeText[agent.slug] || ''
+  textarea.oninput = () => {
+    agentFreeText[agent.slug] = textarea.value
+    saveLocalState()
+  }
+  wrap.appendChild(textarea)
+
+  const attachRow = div('row')
+  const fileInput = document.createElement('input')
+  fileInput.type = 'file'
+  fileInput.accept = '.md,.txt,.feature,.json,.yaml,.yml,.csv'
+  fileInput.className = 'agent-file-attach'
+  fileInput.onchange = async () => {
+    const file = fileInput.files?.[0]
+    if (!file) return
+    const text = await file.text()
+    agentFreeText[agent.slug] = text
+    saveLocalState()
+    render()
+  }
+  attachRow.appendChild(fileInput)
+  const hint = div('muted')
+  hint.textContent = tr('Formatos: .md, .txt, .feature, .json, .yaml, .csv', 'Formats: .md, .txt, .feature, .json, .yaml, .csv')
+  attachRow.appendChild(hint)
+  wrap.appendChild(attachRow)
+  return wrap
+}
+
+function agentFileModal(agent: CustomAgentDefinition): HTMLElement {
+  const overlay = div('agent-modal-overlay')
+  overlay.onclick = (event) => { if (event.target === overlay) closeAgentFileModal() }
+
+  const modal = div('agent-modal')
+  const header = div('agent-modal-header')
+  const title = document.createElement('h3')
+  title.textContent = tr(`Seleccionar archivos — ${agent.name}`, `Select files — ${agent.name}`)
+  header.appendChild(title)
+  header.appendChild(iconBtn(tr('Cerrar', 'Close'), '✕', closeAgentFileModal))
+  modal.appendChild(header)
+
   const input = document.createElement('input')
   input.type = 'text'
-  input.placeholder = tr(`Filtrar archivos (${agent.inputGlob})…`, `Filter files (${agent.inputGlob})…`)
+  input.className = 'agent-modal-filter'
+  input.placeholder = tr(`Filtrar (${agent.inputGlob})…`, `Filter (${agent.inputGlob})…`)
   input.value = agentFileFilter[agent.slug] || ''
-  input.oninput = () => {
-    agentFileFilter[agent.slug] = input.value
-    post({ type: 'suggestAgentFiles', glob: agent.inputGlob || '' })
-  }
-  wrap.appendChild(input)
+  input.oninput = () => { agentFileFilter[agent.slug] = input.value; render() }
+  modal.appendChild(input)
 
   const filterText = (agentFileFilter[agent.slug] || '').toLowerCase()
   const selected = new Set(agentSelectedFiles[agent.slug] || [])
-  const candidates = (agentFileSuggestions.length ? agentFileSuggestions : [...selected])
+  const candidates = agentFileSuggestions
     .filter((path) => !filterText || path.toLowerCase().includes(filterText))
-    .slice(0, 30)
+    .slice(0, 200)
 
-  const list = div('agent-file-list')
+  const list = div('agent-modal-list')
   if (!candidates.length) {
     const empty = div('muted')
     empty.textContent = tr('Sin archivos que coincidan.', 'No matching files.')
@@ -542,17 +662,37 @@ function agentFilePicker(agent: CustomAgentDefinition): HTMLElement {
   for (const path of candidates) {
     const row = div('agent-file-row')
     const check = checkbox(selected.has(path), () => {
-      const current = new Set(agentSelectedFiles[agent.slug] || [])
-      if (check.checked) current.add(path); else current.delete(path)
-      agentSelectedFiles[agent.slug] = [...current]
+      if (check.checked) selected.add(path); else selected.delete(path)
+      agentSelectedFiles[agent.slug] = [...selected]
       saveLocalState()
       render()
     })
     row.appendChild(labeledControl(check, path))
     list.appendChild(row)
   }
-  wrap.appendChild(list)
-  return wrap
+  modal.appendChild(list)
+
+  const actions = div('row agent-modal-actions')
+  actions.appendChild(button(tr('Seleccionar todos', 'Select all'), 'btn btn-ghost btn-sm', () => {
+    agentSelectedFiles[agent.slug] = [...new Set([...selected, ...candidates])]
+    saveLocalState()
+    render()
+  }))
+  actions.appendChild(button(tr('Limpiar', 'Clear'), 'btn btn-ghost btn-sm', () => {
+    agentSelectedFiles[agent.slug] = []
+    saveLocalState()
+    render()
+  }))
+  actions.appendChild(button(tr('Listo', 'Done'), 'btn btn-primary btn-sm', closeAgentFileModal))
+  modal.appendChild(actions)
+
+  overlay.appendChild(modal)
+  return overlay
+}
+
+function closeAgentFileModal() {
+  fileModalAgentSlug = null
+  render()
 }
 
 function agentEditor(agent: CustomAgentDefinition): HTMLElement {
@@ -578,11 +718,27 @@ function agentEditor(agent: CustomAgentDefinition): HTMLElement {
   )
   view.appendChild(iconField)
 
-  const globField = field(
-    tr('Glob de archivos de entrada (opcional)', 'Input files glob (optional)'),
-    inputEl('text', agent.inputGlob || '', (value) => { agent.inputGlob = value }),
-  )
-  view.appendChild(globField)
+  const inputModeSelect = document.createElement('select')
+  for (const [value, es, en] of [
+    ['files', 'Seleccionar archivos del proyecto', 'Select files from the project'],
+    ['freeText', 'Texto libre o archivo adjunto', 'Free text or attached file'],
+  ] as const) {
+    const option = document.createElement('option')
+    option.value = value
+    option.textContent = tr(es, en)
+    option.selected = (agent.inputMode || 'files') === value
+    inputModeSelect.appendChild(option)
+  }
+  inputModeSelect.onchange = () => { agent.inputMode = inputModeSelect.value as CustomAgentDefinition['inputMode']; render() }
+  view.appendChild(field(tr('Entrada', 'Input'), inputModeSelect))
+
+  if ((agent.inputMode || 'files') === 'files') {
+    const globField = field(
+      tr('Glob de archivos de entrada', 'Input files glob'),
+      inputEl('text', agent.inputGlob || '', (value) => { agent.inputGlob = value }),
+    )
+    view.appendChild(globField)
+  }
 
   const instructionsWrap = div('field')
   const instructionsLabel = document.createElement('label')
@@ -1472,22 +1628,27 @@ function settingsView(): HTMLElement {
 
   const cUi = card('Apariencia', 'Tema y tamaño de fuente.')
   const themeSelect = document.createElement('select')
-  for (const [value, label] of [['dark', 'Oscuro'], ['light', 'Claro']]) {
+  for (const [value, label] of THEME_OPTIONS) {
     const option = document.createElement('option')
     option.value = value
     option.textContent = label
     option.selected = currentSettings.theme === value
     themeSelect.appendChild(option)
   }
-  themeSelect.onchange = () => post({ type: 'saveSettings', settings: { theme: themeSelect.value as 'dark' | 'light' } })
+  themeSelect.onchange = () => {
+    const theme = themeSelect.value as UiTheme
+    settings = { ...currentSettings, theme }
+    applyTheme()
+    post({ type: 'saveSettings', settings: { theme } })
+  }
   cUi.appendChild(field('Tema', themeSelect))
   const fontWrap = div('field')
   const fontLabel = document.createElement('label')
   fontLabel.textContent = tr(`Tamaño de fuente: ${currentSettings.fontSize}px`, `Font size: ${currentSettings.fontSize}px`)
   const range = document.createElement('input')
   range.type = 'range'
-  range.min = '11'
-  range.max = '18'
+  range.min = String(FONT_MIN)
+  range.max = String(FONT_MAX)
   range.value = String(currentSettings.fontSize)
   range.oninput = () => {
     fontLabel.textContent = tr(`Tamaño de fuente: ${range.value}px`, `Font size: ${range.value}px`)
@@ -1702,7 +1863,15 @@ const UI_EN = new Map<string, string>([
   ['Tema y tamaño de fuente.', 'Theme and font size.'],
   ['Oscuro', 'Dark'],
   ['Claro', 'Light'],
+  ['Medianoche', 'Midnight'],
+  ['Océano', 'Ocean'],
+  ['Bosque', 'Forest'],
+  ['Atardecer', 'Sunset'],
+  ['Monocromo', 'Monochrome'],
+  ['Solarizado', 'Solarized'],
   ['Tema', 'Theme'],
+  ['Reducir tamaño de fuente', 'Decrease font size'],
+  ['Aumentar tamaño de fuente', 'Increase font size'],
   ['Servidores MCP', 'MCP servers'],
   ['Define servidores en JSON. Habilitarlos autoriza al agente a iniciar el proceso y usar sus tools durante el chat.', 'Define servers in JSON. Enabling them authorizes the agent to start the process and use their tools during chat.'],
   ['Activa sólo servidores confiables: pueden ejecutar acciones y acceder a datos con tus permisos.', 'Enable only trusted servers: they can perform actions and access data with your permissions.'],
@@ -1737,6 +1906,16 @@ const UI_EN = new Map<string, string>([
   ['Ruta de salida (admite {name} y {date})', 'Output path (supports {name} and {date})'],
   ['Nombre e instrucciones son obligatorios.', 'Name and instructions are required.'],
   ['Cancelar', 'Cancel'],
+  ['Seleccionar archivos…', 'Select files…'],
+  ['Pega el texto, requisito o especificación aquí…', 'Paste the text, requirement, or specification here…'],
+  ['Formatos: .md, .txt, .feature, .json, .yaml, .csv', 'Formats: .md, .txt, .feature, .json, .yaml, .csv'],
+  ['Cerrar', 'Close'],
+  ['Seleccionar todos', 'Select all'],
+  ['Limpiar', 'Clear'],
+  ['Listo', 'Done'],
+  ['Entrada', 'Input'],
+  ['Seleccionar archivos del proyecto', 'Select files from the project'],
+  ['Texto libre o archivo adjunto', 'Free text or attached file'],
 ])
 
 function translateUiText(value: string): string {
@@ -1748,6 +1927,8 @@ function translateUiText(value: string): string {
     .replace(/^No se encontró el ejecutable "([^"]+)" en el PATH\.$/, 'Executable "$1" was not found in PATH.')
     .replace(/^(\d+) archivos$/, '$1 files')
     .replace(/^(\d+) archivo\(s\) seleccionado\(s\)$/, '$1 file(s) selected')
+    .replace(/^Seleccionar archivos — (.+)$/, 'Select files — $1')
+    .replace(/^Filtrar \((.+)\)…$/, 'Filter ($1)…')
     .replace(/^Memoria del chat · (.+)$/, 'Chat memory · $1')
     .replace(/^herramientas: /, 'tools: ')
     .replace(/^(\d+) cambio\(s\) propuesto\(s\)$/, '$1 proposed change(s)')

@@ -2,7 +2,7 @@
 
 QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en QA, testing y automatización. Analiza el workspace abierto, investiga con herramientas propias y puede preparar cambios de código, pruebas y comandos para que la persona usuaria los revise y apruebe.
 
-- Versión actual: `1.0.0`
+- Versión actual: `1.0.1`
 - VS Code: `1.85.0` o superior
 - Licencia: [MIT](LICENSE)
 - Historial de cambios: [CHANGELOG.md](CHANGELOG.md)
@@ -30,7 +30,8 @@ QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en
 - Integración con servidores MCP por `stdio`.
 - Proveedores Gemini, Claude, OpenAI y Ollama local.
 - API keys almacenadas mediante `SecretStorage` de VS Code.
-- Tema oscuro/claro y tamaño de fuente configurable.
+- Ocho temas visuales (Oscuro, Claro, Medianoche, Océano, Bosque, Atardecer, Monocromo y Solarizado) con bloques de código de alto contraste.
+- Tamaño de fuente configurable desde el encabezado del Agente (botones -a/+A) o desde Apariencia, con un mínimo de 9 px.
 
 ## Instalación
 
@@ -149,7 +150,7 @@ Esta sección aporta evidencia estática. No sustituye la ejecución de pruebas,
 
 #### Apariencia
 
-Permite elegir tema oscuro o claro y ajustar el tamaño de fuente del webview.
+Permite elegir entre ocho temas visuales —Oscuro, Claro, Medianoche, Océano, Bosque, Atardecer, Monocromo y Solarizado— y ajustar el tamaño de fuente del webview (entre 9 px y 18 px). El tamaño también puede modificarse con los botones **-a/+A** del encabezado del Agente. Los bloques de código usan un fondo casi negro en todos los temas para mejorar el contraste.
 
 #### Servidores MCP
 

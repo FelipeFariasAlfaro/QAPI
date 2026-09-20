@@ -6,6 +6,20 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-17
+
+### Añadido
+
+- Botones **-a/+A** en el encabezado del Agente para reducir o aumentar el tamaño de fuente con un clic, junto a la acción Nueva.
+- Seis temas visuales opcionales además de Oscuro y Claro: Medianoche, Océano, Bosque, Atardecer, Monocromo y Solarizado, seleccionables en Configuración > Apariencia.
+- Nuevo modo de entrada de **texto libre** para agentes personalizados: permite pegar un requisito, historia o documento, o adjuntar un archivo, sin depender de archivos del proyecto.
+
+### Cambiado
+
+- El fondo de los bloques de código, diffs, salidas de comandos y editor JSON de MCP ahora es casi negro para mejorar el contraste y la legibilidad.
+- El tamaño de fuente mínimo del webview bajó de 11 px a 9 px, y los botones del encabezado quedan sincronizados con el control deslizante de Apariencia.
+- Se rediseñó el conjunto de agentes integrados: el generador de casos de prueba ahora produce archivos `.feature` en Gherkin a partir de texto libre, y se depuró el catálogo de agentes de ejemplo.
+
 ## [1.0.0] - 2026-09-10
 
 ### Añadido
@@ -43,5 +57,6 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 - Cada llamada MCP requiere aprobación modal individual antes de ejecutar una tool externa.
 - Plan QA permanece no mutante y los mensajes sociales se procesan sin historial, contexto del workspace, MCP ni herramientas.
 
-[Unreleased]: https://github.com/FelipeFariasAlfaro/QAPI/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/FelipeFariasAlfaro/QAPI/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/FelipeFariasAlfaro/QAPI/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/FelipeFariasAlfaro/QAPI/releases/tag/v1.0.0
