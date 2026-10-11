@@ -82,7 +82,8 @@ export async function detectProfile(paths: string[]): Promise<ProjectProfile> {
   const testCommands: string[] = []
   let manifestText = ''
   for (const name of MANIFESTS) {
-    const hit = paths.find((p) => p === name || p.endsWith(`/${name}`))
+    // El más cercano a la raíz: antes podía elegirse examples/x/package.json.
+    const hit = shallowest(paths.filter((p) => matchesManifest(p, name)))
     if (!hit || !root) continue
     manifests.push(hit)
     try {
@@ -94,11 +95,16 @@ export async function detectProfile(paths: string[]): Promise<ProjectProfile> {
   }
 
   const configFiles = CONFIG_HINTS
-    .map((c) => paths.find((p) => p === c || p.endsWith(`/${c}`)))
+    .map((c) => shallowest(paths.filter((p) => p === c || p.endsWith(`/${c}`))))
     .filter((p): p is string => Boolean(p))
+  // Configuraciones de runner sin manifiesto que las declare (p. ej. sólo behave.ini).
+  if (configFiles.some((file) => /(?:^|\/)behave\.ini$/.test(file))) testCommands.push('behave')
+  if (configFiles.some((file) => /(?:^|\/)pytest\.ini$/.test(file))) testCommands.push('pytest')
 
-  // Frameworks: por manifiesto, por config y por extensiones presentes.
-  const haystack = `${manifestText}\n${configFiles.join('\n')}\n${paths.slice(0, 800).join('\n')}`
+  // Frameworks: por manifiesto, por config y por extensiones presentes. Las
+  // carpetas de reportes no cuentan (playwright-report no implica Playwright).
+  const sourcePaths = paths.filter((p) => !/(?:^|\/)(?:playwright-report|test-results|allure-[\w-]+|coverage)(?:\/|$)/.test(p))
+  const haystack = `${manifestText}\n${configFiles.join('\n')}\n${sourcePaths.slice(0, 800).join('\n')}`
   const testFrameworks = FRAMEWORK_MARKERS
     .filter((f) => f.patterns.some((re) => re.test(haystack)))
     .map((f) => f.name)
@@ -113,7 +119,16 @@ export async function detectProfile(paths: string[]): Promise<ProjectProfile> {
   const hasFeatures = paths.some((p) => p.endsWith('.feature'))
   const usesBdd = hasFeatures
 
-  return { languages, testFrameworks, manifests, testCommands, testDirs, usesBdd, configFiles }
+  return { languages, testFrameworks, manifests, testCommands: [...new Set(testCommands)], testDirs, usesBdd, configFiles }
+}
+
+function matchesManifest(path: string, name: string): boolean {
+  if (name === 'requirements.txt') return /(?:^|\/)requirements[\w.-]*\.txt$/.test(path)
+  return path === name || path.endsWith(`/${name}`)
+}
+
+function shallowest(paths: string[]): string | undefined {
+  return [...paths].sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))[0]
 }
 
 /** Extrae comandos de prueba declarados en el manifiesto. */
@@ -128,7 +143,7 @@ function collectTestCommands(file: string, text: string, out: string[]) {
   }
   if (file.endsWith('pom.xml')) out.push('mvn test')
   if (/build\.gradle/.test(file)) out.push('gradle test')
-  if (file.endsWith('pyproject.toml') || file.endsWith('requirements.txt')) {
+  if (/(?:pyproject\.toml|requirements[\w.-]*\.txt|Pipfile|setup\.py)$/.test(file)) {
     if (/behave/i.test(text)) out.push('behave')
     if (/pytest/i.test(text)) out.push('pytest')
   }

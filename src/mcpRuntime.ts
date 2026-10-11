@@ -59,12 +59,23 @@ class StdioMcpClient {
     server: McpServerDef,
     cwd: string,
   ) {
-    this.child = spawn(server.command, server.args, {
-      cwd,
-      env: { ...process.env, ...(server.env ?? {}) },
-      shell: false,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    // En Windows `npx`, `uvx`, etc. son `.cmd`/`.bat`: desde Node 18.20/20.12
+    // sólo se pueden lanzar con shell. Los argumentos se citan para cmd.exe.
+    const windowsShim = process.platform === 'win32' && !/\.(?:exe|com)$/i.test(server.command)
+    this.child = windowsShim
+      ? spawn([server.command, ...server.args].map(quoteForCmd).join(' '), {
+        cwd,
+        env: { ...process.env, ...(server.env ?? {}) },
+        shell: true,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      : spawn(server.command, server.args, {
+        cwd,
+        env: { ...process.env, ...(server.env ?? {}) },
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
 
     this.child.stdout.on('data', (chunk: Buffer | string) => {
       this.consumeStdout(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
@@ -222,8 +233,23 @@ class StdioMcpClient {
     }
   }
 
+  isAlive(): boolean {
+    return !this.closed && this.child.exitCode === null && this.child.signalCode === null
+  }
+
   private handleMessage(message: unknown): void {
-    if (!isRecord(message) || (typeof message.id !== 'number' && typeof message.id !== 'string')) return
+    if (!isRecord(message)) return
+    // Peticiones/notificaciones del servidor (traen `method`): no son respuestas.
+    // Antes, un `ping` con un id coincidente resolvía una petición del cliente.
+    if (typeof message.method === 'string') {
+      if (message.id === undefined || message.id === null) return
+      const reply = message.method === 'ping'
+        ? { jsonrpc: '2.0', id: message.id, result: {} }
+        : { jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `Método no soportado: ${message.method}` } }
+      try { this.writeMessage(reply) } catch { /* el servidor ya cerró */ }
+      return
+    }
+    if (typeof message.id !== 'number' && typeof message.id !== 'string') return
     const numericId = typeof message.id === 'number' ? message.id : Number(message.id)
     if (!Number.isSafeInteger(numericId)) return
 
@@ -280,12 +306,155 @@ class StdioMcpClient {
   }
 }
 
+// ── Pool persistente ────────────────────────────────────────────────────────
+//
+// Antes cada mensaje del chat arrancaba y cerraba todos los servidores MCP
+// habilitados (con `npx`, varios segundos por turno aunque no se usaran). Ahora
+// se reutiliza una conexión mientras la configuración no cambie, y se apaga
+// tras un período de inactividad o si algún servidor murió.
+
+const IDLE_SHUTDOWN_MS = 10 * 60_000
+/** Con servidores que fallaron, se reintenta como mucho cada este intervalo. */
+const FAILED_RETRY_MS = 2 * 60_000
+
+interface InternalRuntime extends McpRuntime {
+  alive(): boolean
+  call(name: string, args: Record<string, unknown>, onProgress?: ProgressCallback): Promise<string>
+}
+
+interface PoolEntry {
+  key: string
+  runtime: Promise<InternalRuntime>
+  createdAt: number
+  inUse: number
+  idleTimer?: NodeJS.Timeout
+}
+
+let poolEntry: PoolEntry | undefined
+
+function closeEntry(entry: PoolEntry): void {
+  if (entry.idleTimer) clearTimeout(entry.idleTimer)
+  void entry.runtime.then((runtime) => runtime.close()).catch(() => undefined)
+}
+
+function scheduleIdle(entry: PoolEntry): void {
+  if (entry.inUse > 0) return
+  if (entry.idleTimer) clearTimeout(entry.idleTimer)
+  entry.idleTimer = setTimeout(() => {
+    if (poolEntry === entry && entry.inUse === 0) {
+      poolEntry = undefined
+      closeEntry(entry)
+    }
+  }, IDLE_SHUTDOWN_MS)
+  entry.idleTimer.unref?.()
+}
+
+/** Cierra los servidores MCP del pool (al desactivar la extensión o cambiar de workspace). */
+export async function shutdownMcpPool(): Promise<void> {
+  const entry = poolEntry
+  poolEntry = undefined
+  if (!entry) return
+  if (entry.idleTimer) clearTimeout(entry.idleTimer)
+  try { await (await entry.runtime).close() } catch { /* ya cerrado */ }
+}
+
+/**
+ * Devuelve un runtime MCP listo para usar. `close()` sólo libera el préstamo;
+ * los servidores siguen vivos en el pool para el siguiente mensaje.
+ */
 export async function openMcpRuntime(
   raw: string,
   enabled: Readonly<Record<string, boolean>>,
   cwd: string,
   onProgress?: ProgressCallback,
 ): Promise<McpRuntime> {
+  const enabledNames = Object.keys(enabled).filter((name) => enabled[name] === true).sort()
+  if (!enabledNames.length) {
+    if (poolEntry) await shutdownMcpPool()
+    return { tools: [], issues: [], call: async () => '', close: async () => {} }
+  }
+  const key = createHash('sha256').update(JSON.stringify([raw, enabledNames, cwd])).digest('hex')
+
+  if (poolEntry && poolEntry.key !== key) {
+    closeEntry(poolEntry)
+    poolEntry = undefined
+  }
+  if (poolEntry) {
+    const existing = await poolEntry.runtime.catch(() => undefined)
+    const retryFailures = existing && existing.issues.length > 0 && Date.now() - poolEntry.createdAt > FAILED_RETRY_MS
+    if (!existing || !existing.alive() || retryFailures) {
+      closeEntry(poolEntry)
+      poolEntry = undefined
+    }
+  }
+  if (!poolEntry) {
+    poolEntry = { key, runtime: createMcpRuntime(raw, enabled, cwd, onProgress), createdAt: Date.now(), inUse: 0 }
+  }
+
+  const entry = poolEntry
+  if (entry.idleTimer) clearTimeout(entry.idleTimer)
+  entry.inUse++
+  let runtime: InternalRuntime
+  try {
+    runtime = await entry.runtime
+  } catch (error) {
+    entry.inUse--
+    if (poolEntry === entry) poolEntry = undefined
+    throw error
+  }
+  let released = false
+  return {
+    tools: runtime.tools,
+    issues: runtime.issues,
+    call: (name, args) => runtime.call(name, args, onProgress),
+    close: async () => {
+      if (released) return
+      released = true
+      entry.inUse = Math.max(0, entry.inUse - 1)
+      if (poolEntry === entry) scheduleIdle(entry)
+      else if (entry.inUse === 0) closeEntry(entry)
+    },
+  }
+}
+
+export interface McpProbeResult {
+  ok: boolean
+  tools: { name: string; description?: string }[]
+  message?: string
+  durationMs: number
+}
+
+/**
+ * Prueba un servidor de la configuración: lo inicia, lista sus tools y lo
+ * cierra. No usa el pool ni lo habilita para el chat.
+ */
+export async function probeMcpServer(raw: string, name: string, cwd: string): Promise<McpProbeResult> {
+  const startedAt = Date.now()
+  const runtime = await createMcpRuntime(raw, { [name]: true }, cwd)
+  try {
+    const ownIssues = runtime.issues.filter((issue) => issue.startsWith(`${name}:`))
+    const tools = runtime.tools.map((tool) => ({
+      name: tool.remoteName,
+      description: tool.definition.description?.slice(0, 160),
+    }))
+    const connected = runtime.alive() && ownIssues.every((issue) => /se limitó a/.test(issue))
+    return {
+      ok: connected,
+      tools,
+      message: connected ? undefined : (ownIssues[0]?.slice(name.length + 1).trim() || 'El servidor no respondió.'),
+      durationMs: Date.now() - startedAt,
+    }
+  } finally {
+    await runtime.close()
+  }
+}
+
+async function createMcpRuntime(
+  raw: string,
+  enabled: Readonly<Record<string, boolean>>,
+  cwd: string,
+  onProgress?: ProgressCallback,
+): Promise<InternalRuntime> {
   const parsed = parseMcpConfig(raw)
   const issues: string[] = parsed.issues.map((issue) => `${issue.name}: ${issue.message}`)
   if (parsed.error) issues.push(parsed.error)
@@ -351,12 +520,13 @@ export async function openMcpRuntime(
   return {
     tools,
     issues,
-    async call(name: string, args: Record<string, unknown>): Promise<string> {
+    alive: () => !runtimeClosed && clients.every((client) => client.isAlive()),
+    async call(name: string, args: Record<string, unknown>, callProgress?: ProgressCallback): Promise<string> {
       if (runtimeClosed) throw new Error('El runtime MCP está cerrado.')
       const binding = bindings.get(name)
       if (!binding) throw new Error(`Herramienta MCP desconocida: ${name}`)
       const safeArgs = isRecord(args) ? args : {}
-      progress(onProgress, name, 'Ejecutando herramienta MCP…')
+      progress(callProgress ?? onProgress, name, 'Ejecutando herramienta MCP…')
       return binding.client.callTool(binding.remoteName, safeArgs)
     },
     async close(): Promise<void> {
@@ -365,6 +535,13 @@ export async function openMcpRuntime(
       await Promise.all(clients.map((client) => client.close()))
     },
   }
+}
+
+/** Cita un argumento para cmd.exe (sólo se usa en Windows con shims .cmd). */
+function quoteForCmd(value: string): string {
+  if (/^[\w@%+=:,./\\-]+$/.test(value)) return value
+  // Dentro de comillas, cmd.exe trata literalmente & | < > ^; sólo se duplican las comillas.
+  return `"${value.replace(/"/g, '""')}"`
 }
 
 function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
@@ -386,12 +563,62 @@ function sanitizeSchema(schema: Record<string, unknown> | undefined): Record<str
   }
 }
 
-function normalizeSchemaNode(value: unknown, depth: number, root = false): Record<string, unknown> {
+const SCHEMA_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'object', 'array'])
+const MAX_VARIANTS = 10
+
+/**
+ * Normaliza un JSON Schema de MCP a un subconjunto que aceptan todos los
+ * proveedores. Conserva `anyOf`/`oneOf` y los tipos múltiples (antes se
+ * convertían en `string` y el modelo enviaba argumentos del tipo equivocado).
+ * `null` se descarta: basta con no enviar el campo, y no todos los proveedores
+ * aceptan `type: "null"` o `nullable`.
+ */
+export function normalizeSchemaNode(value: unknown, depth: number, root = false): Record<string, unknown> {
   if (!isRecord(value) || depth > 6) return root ? { type: 'object', properties: {} } : { type: 'string' }
-  const type = root ? 'object' : (typeof value.type === 'string' ? value.type : 'string')
+  if (root) return withDescription(typedSchemaNode(value, 'object', depth), value)
+
+  const variants = Array.isArray(value.anyOf) ? value.anyOf : Array.isArray(value.oneOf) ? value.oneOf : undefined
+  if (variants) {
+    const branches = variants
+      .filter((branch) => isRecord(branch) && branch.type !== 'null')
+      .slice(0, MAX_VARIANTS)
+      .map((branch) => normalizeSchemaNode(branch, depth + 1))
+    if (branches.length === 0) return withDescription({ type: 'string' }, value)
+    if (branches.length === 1) return withDescription(branches[0], value)
+    return withDescription({ anyOf: branches }, value)
+  }
+
+  const declared = (Array.isArray(value.type) ? value.type : [value.type])
+    .filter((type): type is string => typeof type === 'string' && SCHEMA_TYPES.has(type))
+  const types = declared.length ? [...new Set(declared)] : [inferSchemaType(value)]
+  if (types.length > 1) {
+    return withDescription({ anyOf: types.map((type) => typedSchemaNode(value, type, depth)) }, value)
+  }
+  return withDescription(typedSchemaNode(value, types[0], depth), value)
+}
+
+function inferSchemaType(value: Record<string, unknown>): string {
+  if (isRecord(value.properties)) return 'object'
+  if (value.items !== undefined) return 'array'
+  return 'string'
+}
+
+function withDescription(node: Record<string, unknown>, value: Record<string, unknown>): Record<string, unknown> {
+  if (typeof value.description === 'string' && node.description === undefined) node.description = value.description.slice(0, 500)
+  return node
+}
+
+function typedSchemaNode(value: Record<string, unknown>, type: string, depth: number): Record<string, unknown> {
   const output: Record<string, unknown> = { type }
-  if (typeof value.description === 'string') output.description = value.description.slice(0, 500)
-  if (Array.isArray(value.enum)) output.enum = value.enum.slice(0, 50).filter((item) => ['string', 'number', 'boolean'].includes(typeof item))
+  if (Array.isArray(value.enum)) {
+    const expected = type === 'integer' ? 'number' : type
+    const values = value.enum.slice(0, 50).filter((item) => typeof item === expected)
+    if (values.length) output.enum = values
+  }
+  if (type === 'number' || type === 'integer') {
+    if (typeof value.minimum === 'number') output.minimum = value.minimum
+    if (typeof value.maximum === 'number') output.maximum = value.maximum
+  }
   if (type === 'object') {
     const properties: Record<string, unknown> = {}
     if (isRecord(value.properties)) {

@@ -1,8 +1,8 @@
 # QAPI - Agente de inteligencia artificial
 
-QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en QA, testing y automatización. Analiza el workspace abierto, investiga con herramientas propias y puede preparar cambios de código, pruebas y comandos para que la persona usuaria los revise y apruebe.
+QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en QA, testing y automatización. Analiza el workspace abierto, investiga con herramientas propias y prepara cambios de código, pruebas y comandos para que tú los revises y apruebes.
 
-- Versión actual: `1.0.1`
+- Versión actual: `1.1.4`
 - VS Code: `1.85.0` o superior
 - Licencia: [MIT](LICENSE)
 - Historial de cambios: [CHANGELOG.md](CHANGELOG.md)
@@ -10,32 +10,25 @@ QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en
 
 ## Características principales
 
-- Interfaz y respuestas del asistente en español o inglés.
-- Selección obligatoria de idioma en el primer inicio.
-- Contexto del editor: archivo activo, selección, editores visibles y Problems.
-- Contexto del repositorio: mapa de archivos, búsqueda léxica local, Git status y Git diff.
-- Detección del stack, framework de pruebas y convenciones existentes.
-- Modos **Agente** y **Plan QA**.
-- Creación y edición de archivos mediante propuestas revisables, con explicación de qué cambia y por qué.
-- Protección host-side para que saludos y solicitudes sin intención explícita no generen cambios.
-- Diff por archivo y por hunk, con aplicación selectiva.
-- Checkpoints persistentes y deshacer con verificación de conflictos.
-- Comandos de test, lint o build ejecutados únicamente después de aprobación.
-- Validación automática opcional después de aplicar cambios.
-- Análisis de pruebas probablemente impactadas por el Git diff.
-- Diagnóstico de reportes, logs, screenshots y traces recientes.
-- Trazabilidad estática entre requisitos, escenarios, steps y pruebas.
-- Memoria editable y persistente por workspace.
-- Memoria automática de investigación con caché validada por hash para evitar lecturas repetidas.
-- Integración con servidores MCP por `stdio`.
+- **Agente QA con contexto real del proyecto:** archivo activo, selección, editores visibles, Problems, Git status y Git diff, mapa del repositorio y búsqueda local.
+- **Detección del stack:** lenguajes, frameworks de prueba (Behave, pytest, Playwright, Cypress, Jest, JUnit y otros), manifiestos y convenciones Gherkin, incluidos los steps existentes para reutilizarlos.
+- **Cambios revisables:** cada archivo propuesto explica qué cambia y por qué, con diff por archivo y por hunk, aplicación selectiva, checkpoints y deshacer seguro.
+- **Verificación de lo creado:** QAPI comprueba que los archivos que el agente dice haber creado existan, y al aplicar relee cada archivo desde el disco para confirmar su contenido.
+- **Skills:** instrucciones reutilizables que el agente aplica de forma automática, ante eventos (resultado de prueba, preparar un archivo), por tipo de archivo o a pedido. Se crean visualmente, sin editar Markdown.
+- **MCP:** pestaña para añadir, probar y activar servidores MCP por `stdio`, con plantillas (Playwright, Filesystem, Git, Fetch) y aprobación por llamada o autoaprobación.
+- **Verificación definida por ti:** tú eliges el comando y su alcance (por ejemplo `behave {tests}` para correr sólo las pruebas que cambiaron). QAPI nunca elige ni ejecuta una suite por su cuenta.
+- **Comandos con aprobación:** el agente propone comandos de test, lint o build y sólo se ejecutan cuando los apruebas. Puedes detenerlos en cualquier momento.
+- **Selector de modelo en el chat** y botón **Detener** para cancelar una respuesta en curso.
+- **Agentes personalizados** con instrucción fija, entrada por archivos o texto libre y salida al chat o a un archivo.
+- Diagnóstico de reportes, logs y traces; análisis de pruebas impactadas por el Git diff; trazabilidad estática entre requisitos, escenarios, steps y pruebas.
+- Memoria editable por proyecto y memoria automática de investigación validada por hash.
 - Proveedores Gemini, Claude, OpenAI y Ollama local.
-- API keys almacenadas mediante `SecretStorage` de VS Code.
-- Ocho temas visuales (Oscuro, Claro, Medianoche, Océano, Bosque, Atardecer, Monocromo y Solarizado) con bloques de código de alto contraste.
-- Tamaño de fuente configurable desde el encabezado del Agente (botones -a/+A) o desde Apariencia, con un mínimo de 9 px.
+- Privacidad: sin telemetría, API keys en `SecretStorage` y redacción de secretos antes de enviar contexto al modelo.
+- Interfaz en español o inglés, ocho temas visuales y tamaño de fuente ajustable.
 
 ## Instalación
 
-QAPI se distribuirá en los dos catálogos oficiales del ecosistema VS Code:
+QAPI está disponible en los dos catálogos oficiales del ecosistema VS Code:
 
 - [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=centyc.qa-pi)
 - [Open VSX Registry](https://open-vsx.org/extension/centyc/qa-pi)
@@ -51,28 +44,29 @@ Busca **QAPI - Agente de inteligencia artificial** en la vista **Extensions** de
 5. Pulsa **Validar**, selecciona un modelo y guarda la configuración.
 6. Regresa a **Agente QAPI** y escribe tu primera solicitud.
 
-El idioma puede cambiarse posteriormente desde **Configuración > Idioma**. Las conversaciones anteriores conservan su texto original; el nuevo idioma se aplica a la interfaz y a las respuestas futuras.
+El idioma puede cambiarse después desde **Configuración > Idioma**. Las conversaciones anteriores conservan su texto original; el nuevo idioma se aplica a la interfaz y a las respuestas futuras.
 
 ## Guía de la interfaz
 
+QAPI se organiza en seis pestañas: **Agente QAPI**, **Agentes**, **Skills**, **MCP**, **Configuración** y **Sobre Centyc**.
+
 ### Agente QAPI
 
-Es el área principal de trabajo con el asistente. Muestra el proyecto activo, el estado del índice local, el uso estimado de la ventana de contexto, el historial y el compositor de mensajes.
+Es el área principal de trabajo. Muestra el proyecto activo, el estado del índice, el uso estimado de la ventana de contexto, el historial y el compositor.
 
-#### Modos del agente
+#### Compositor
 
-- **Agente:** investiga el proyecto, responde preguntas y puede preparar cambios o comandos para aprobación.
-- **Plan QA:** investiga y diseña una solución sin modificar archivos ni ejecutar comandos. Entrega objetivo, hallazgos, alcance, riesgos, criterios de aceptación, archivos probables, tareas y validación. Un plan puede enviarse posteriormente al modo Agente para ejecutarlo.
+- Escribe tu solicitud y usa `#` para añadir contexto explícito: `#file:ruta`, `#folder:ruta`, `#problems`, `#gitDiff` o `#skill:nombre`.
+- **Selector de modelo:** cambia el modelo para los próximos mensajes sin ir a Configuración.
+- **Autoaprobar MCP:** aparece cuando hay servidores MCP activos. Encendido, las tools MCP se ejecutan sin pedir confirmación en cada llamada.
+- **Enviar / Detener:** mientras QAPI trabaja, el botón cambia a **Detener** y cancela la respuesta o el comando en curso.
+- Botones **-a/+A** en el encabezado para ajustar el tamaño de fuente, y **Nueva** para empezar una conversación limpia.
 
-#### Acciones rápidas
-
-- **Pruebas impactadas:** relaciona los archivos presentes en el Git diff con pruebas probablemente afectadas y sugiere comandos verificables. El resultado es una inferencia, no una garantía de cobertura.
-- **Diagnosticar último reporte:** localiza el artefacto de pruebas más reciente —reporte, log, screenshot o trace— y solicita al agente un diagnóstico basado en esa evidencia.
-- **Nueva conversación:** elimina el historial del workspace actual y comienza una conversación limpia.
+Puedes seguir escribiendo y desplazarte por el historial mientras llega una respuesta.
 
 #### Contexto utilizado
 
-Cada respuesta puede indicar qué fuentes estuvieron disponibles: archivo activo, selección del editor, archivos visibles, Problems, Git y metadatos de terminales. VS Code no permite leer el historial de terminales ajenas; QAPI sólo usa sus metadatos y la salida de procesos iniciados por la propia extensión.
+Cada respuesta indica qué fuentes usó: archivo activo, selección, archivos visibles, Problems, Git, metadatos de terminales, memoria automática y skills aplicadas. VS Code no permite leer el historial de terminales ajenas; QAPI sólo usa sus metadatos y la salida de procesos iniciados por la propia extensión.
 
 #### Propuestas de cambios
 
@@ -83,107 +77,127 @@ Cuando el agente necesita modificar el proyecto:
 3. Explica el objetivo general y, para cada archivo, qué cambia y por qué.
 4. Presenta un diff dividido en hunks.
 5. Permite seleccionar todos los cambios, archivos completos o hunks individuales.
-6. Aplica únicamente lo aprobado.
-7. Crea un checkpoint para permitir una restauración segura.
+6. Aplica únicamente lo aprobado y crea un checkpoint para restaurar de forma segura.
+7. Relee cada archivo aplicado desde el disco y confirma en el turno que quedó con el contenido esperado.
 
-Las herramientas de escritura y comandos sólo se habilitan cuando la solicitud actual expresa intención de cambio o confirma inequívocamente una propuesta o plan inmediato. Saludos como `hi!` o `hola` se responden sin herramientas, MCP, contexto del workspace ni reanudación de tareas anteriores.
+Si la respuesta del agente menciona haber creado archivos que no preparó y que no existen en el proyecto, QAPI le pide que los prepare. Si siguen faltando, la respuesta lo advierte claramente.
 
-QAPI comprueba que los archivos no hayan cambiado desde que se preparó la propuesta. Si detecta un conflicto, evita sobrescribir contenido de forma silenciosa.
+Las herramientas de escritura sólo se habilitan cuando la solicitud expresa intención de cambio o confirma una propuesta inmediata. Saludos como `hola` se responden sin herramientas ni contexto del workspace. QAPI comprueba que los archivos no hayan cambiado desde que se preparó la propuesta y nunca sobrescribe conflictos de forma silenciosa. Nunca escribe en `.git`.
 
 #### Comandos y ejecuciones
 
-El agente puede proponer comandos de test, lint o build, pero no los ejecuta automáticamente. Cada propuesta muestra el comando y su motivo; la persona usuaria decide si lo aprueba. La salida, duración, estado y código de salida quedan asociados a la conversación.
+El agente puede proponer comandos de test, lint o build, pero no los ejecuta solo. Cada propuesta muestra el comando y su motivo, y tú decides si lo ejecutas. La salida, duración, estado y código de salida quedan en la conversación. Las ejecuciones fallidas ofrecen **Diagnosticar con IA**.
 
-### Configuración
+Los comandos tienen un tiempo máximo; al alcanzarlo o al pulsar **Detener**, QAPI termina el proceso y todos sus procesos hijos. Se bloquean operaciones evidentemente destructivas (por ejemplo `rm -rf`, `git push --force`, `curl … | sh`) y directorios de trabajo fuera del workspace.
 
-Todas las secciones son acordeones inicialmente plegados. Haz clic en el encabezado para abrir la sección necesaria.
+### Agentes
 
-#### Idioma
+Presets con una instrucción fija para tareas repetibles. Cada agente toma como entrada archivos del proyecto (filtrados por un glob) o texto libre y un archivo adjunto, y entrega el resultado en el chat o en un archivo. Incluye agentes para documentación de negocio y generación de casos de prueba en Gherkin. Se guardan en `.qapi/agents/` para compartirlos con el equipo.
 
-Cambia entre español e inglés. La selección actualiza inmediatamente los textos de la interfaz, los mensajes automáticos, los resúmenes y las respuestas futuras del agente. No traduce ni reescribe el historial existente.
+### Skills
 
-#### Proveedor de IA
+Instrucciones reutilizables que el agente aplica cuando corresponde: cómo analizar fallos, cómo escribir localizadores, convenciones del equipo. Se crean y editan desde un formulario visual y se guardan en `.qapi/skills/*.md`, versionables con el proyecto.
 
-Configura la conexión con Gemini, Claude, OpenAI u Ollama:
+Cada skill define **cuándo se usa**:
 
-- valida credenciales o conectividad;
-- obtiene los modelos disponibles;
-- guarda el modelo elegido;
-- registra el límite de contexto cuando el proveedor lo informa;
-- permite definir la URL de Ollama local.
+| Modo | Cuándo se aplica |
+| --- | --- |
+| Automática | El agente lee la descripción y la carga sólo si la tarea la necesita |
+| Ante un evento | **Resultado de prueba** o **Al preparar archivos** (con un patrón opcional) |
+| Por tipo de archivo | Cuando trabajas con archivos que coinciden con un patrón, por ejemplo `**/*.feature` |
+| Siempre | En todos los mensajes |
+| Manual | Sólo cuando la nombras con `#skill:nombre` |
 
-Las API keys no se guardan en archivos del repositorio ni en texto plano dentro de la configuración de QAPI.
+También puedes limitar una skill a proyectos con ciertos frameworks o lenguajes (por ejemplo, sólo Behave). Hay plantillas listas: análisis de fallos, localizadores con XPath, casos límite y negativos, y reporte de bug.
 
-#### Comportamiento
+Con el evento **Resultado de prueba**, cuando un comando que ejecutaste falla, QAPI abre un análisis automático con esa skill. Una skill es una instrucción para el modelo, no una regla obligatoria: normalmente la sigue, pero puede desviarse. Sólo se cargan en workspaces confiables.
 
-Incluye la opción **Ejecutar validación detectada automáticamente**. Al activarla, QAPI intenta ejecutar un comando de validación reconocido después de aplicar cambios. Sólo funciona en workspaces confiables y permanece desactivada por defecto.
+### MCP
 
-#### Memoria del proyecto
+Conecta herramientas externas al agente mediante servidores MCP por `stdio`.
 
-Permite guardar manualmente convenciones, objetivos, decisiones y reglas específicas del workspace. Esta memoria se añade al contexto de conversaciones futuras y puede editarse o eliminarse en cualquier momento. Su límite actual es de 12.000 caracteres.
+- Añade o edita servidores con un formulario (nombre, comando, argumentos y variables de entorno) o edita el JSON directamente.
+- Parte de plantillas: Filesystem, Playwright, Git y Fetch.
+- **Probar conexión** inicia el servidor, lista sus tools y lo cierra, para comprobar que funciona antes de usarlo.
+- Activa cada servidor con su interruptor. Los servidores activos se reutilizan entre mensajes y se apagan tras 10 minutos sin uso.
 
-Además, QAPI mantiene una **memoria automática de investigación** separada. Conserva de forma local y acotada los archivos ya leídos y las consultas de estructura o código realizadas. Antes de investigar una nueva solicitud, recupera sólo los recuerdos relacionados y comprueba sus hashes contra el índice actual:
+Cada llamada a una tool MCP pide aprobación (**Permitir una vez** o **Permitir siempre**), salvo que actives **Autoaprobar MCP** en el chat. Activa sólo servidores de confianza: se ejecutan con tus permisos. Las plantillas usan la última versión del paquete; puedes fijar una versión en los argumentos (`paquete@1.2.3`). Las variables de entorno se guardan sin cifrar en la configuración de VS Code.
 
-- si un archivo no cambió, reutiliza el contenido ya inspeccionado;
-- si cambió, elimina esa entrada y vuelve a leerla cuando sea necesario;
-- cualquier cambio del índice invalida las búsquedas y listados que podrían estar obsoletos;
-- sólo se cachean archivos incluidos en el índice y de hasta 200 KiB; el resto se vuelve a leer cuando haga falta;
-- los archivos menos recientes se eliminan automáticamente al alcanzar el límite de la caché.
-
-La memoria automática puede eliminarse desde la Command Palette con **QAPI: Limpiar memoria automática**.
-
-#### Checkpoints recientes
-
-Lista las últimas restauraciones disponibles para cambios aplicados por QAPI. Cada checkpoint conserva el estado anterior y posterior de los archivos, junto con hashes para detectar modificaciones externas. Deshacer se bloquea si la operación podría sobrescribir cambios posteriores.
-
-#### Trazabilidad estática inferida
-
-Analiza el contenido indexado para relacionar:
-
-- IDs o tags de requisitos;
-- escenarios Gherkin;
-- steps y definiciones de steps;
-- archivos de prueba;
-- vínculos y gaps inferidos.
-
-Esta sección aporta evidencia estática. No sustituye la ejecución de pruebas, la cobertura runtime ni una matriz de trazabilidad validada por el equipo.
-
-#### Apariencia
-
-Permite elegir entre ocho temas visuales —Oscuro, Claro, Medianoche, Océano, Bosque, Atardecer, Monocromo y Solarizado— y ajustar el tamaño de fuente del webview (entre 9 px y 18 px). El tamaño también puede modificarse con los botones **-a/+A** del encabezado del Agente. Los bloques de código usan un fondo casi negro en todos los temas para mejorar el contraste.
-
-#### Servidores MCP
-
-Acepta una configuración JSON compatible con el formato `mcpServers`. QAPI valida la estructura y comprueba que cada ejecutable exista antes de permitir su activación.
-
-Habilitar un servidor autoriza a QAPI a iniciar su proceso y descubrir sus tools durante la conversación con el agente. Cada llamada MCP requiere una aprobación modal individual antes de ejecutarse, porque es externa y puede leer o modificar datos según su implementación. Activa únicamente servidores de confianza.
-
-Ejemplo:
+Ejemplo de configuración:
 
 ```json
 {
   "mcpServers": {
-    "filesystem": {
+    "playwright": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      "args": ["-y", "@playwright/mcp"]
     },
     "git": {
       "command": "uvx",
-      "args": ["mcp-server-git"]
+      "args": ["mcp-server-git", "--repository", "."]
     }
   }
 }
 ```
 
+### Configuración
+
+Todas las secciones son acordeones. Haz clic en el encabezado para abrir la que necesites.
+
+#### Idioma
+
+Cambia entre español e inglés. Actualiza la interfaz, los mensajes automáticos y las respuestas futuras del agente. No reescribe el historial existente.
+
+#### Proveedor de IA
+
+Configura Gemini, Claude, OpenAI u Ollama: valida credenciales, obtiene los modelos disponibles, guarda el modelo elegido y registra su límite de contexto cuando el proveedor lo informa. La API key guardada nunca se muestra; deja el campo vacío para conservarla.
+
+#### Comportamiento: verificación tras aplicar cambios
+
+Elige qué hacer después de aplicar cambios:
+
+- **No verificar** (predeterminado).
+- **Proponer el comando:** deja el comando listo con su botón Ejecutar.
+- **Ejecutar el comando después de aplicar.**
+- **Ejecutar y corregir automáticamente:** reintenta hasta 3 veces y sólo edita los archivos citados en el error, nunca manifiestos, scripts ni carpetas de configuración.
+
+El **comando de verificación** lo defines tú y admite marcadores:
+
+| Marcador | Se reemplaza por |
+| --- | --- |
+| `{tests}` | Los archivos de prueba que cambiaron. Si no cambió ninguno, no se ejecuta nada |
+| `{files}` | Todos los archivos cambiados |
+| `{tests,}` | Los archivos de prueba unidos con comas (por ejemplo para `cypress run --spec`) |
+
+Ejemplos: `behave {tests}`, `pytest {tests}`, `npx playwright test {tests}`. Sin marcadores, el comando se ejecuta tal cual; evita suites completas en proyectos grandes. **Sugerir para este proyecto** propone una plantilla según el framework detectado, que sólo se usa si la guardas. La verificación sólo funciona en workspaces confiables.
+
+#### Memoria del proyecto
+
+Guarda convenciones, objetivos, decisiones y reglas del workspace, que se añaden al contexto de conversaciones futuras (hasta 12.000 caracteres).
+
+QAPI mantiene además una **memoria automática de investigación**: conserva de forma local y acotada los archivos leídos y las búsquedas realizadas, y los reutiliza sólo si su hash sigue coincidiendo con el índice actual. Puedes borrarla desde la Command Palette con **QAPI: Limpiar memoria automática**.
+
+#### Checkpoints recientes
+
+Lista las restauraciones disponibles para cambios aplicados por QAPI. Cada checkpoint conserva el estado anterior y posterior de los archivos con hashes para detectar modificaciones externas. Deshacer se bloquea si podría sobrescribir cambios posteriores.
+
+#### Trazabilidad estática inferida
+
+Relaciona IDs o tags de requisito (por ejemplo `@ABC-123` o `REQ-12`), escenarios Gherkin, steps, definiciones de steps y archivos de prueba, e informa los huecos detectados. Es evidencia estática: no sustituye la ejecución de pruebas ni la cobertura runtime.
+
+#### Apariencia
+
+Ocho temas visuales (Oscuro, Claro, Medianoche, Océano, Bosque, Atardecer, Monocromo y Solarizado) y tamaño de fuente entre 9 px y 18 px. Los bloques de código usan un fondo casi negro en todos los temas.
+
 ### Sobre Centyc
 
-Presenta información y acceso al Centro Latinoamericano de Testing y Calidad de Software, junto con el aviso de privacidad, la licencia MIT y el enlace al repositorio oficial de QAPI.
+Información y acceso al Centro Latinoamericano de Testing y Calidad de Software, junto con el aviso de privacidad, la licencia MIT y el enlace al repositorio oficial.
 
 ## Proveedores compatibles
 
 | Proveedor | Autenticación | Configuración adicional |
 | --- | --- | --- |
-| Gemini | API key | Lista modelos mediante la API de Google |
+| Gemini | API key | Lista modelos y su límite de contexto mediante la API de Google |
 | Claude | API key | Lista modelos mediante la API de Anthropic |
 | OpenAI | API key | Admite la URL base predeterminada u otra compatible |
 | Ollama | No requiere API key | URL local predeterminada: `http://localhost:11434` |
@@ -196,16 +210,14 @@ QAPI no incluye telemetría propia, publicidad, cuentas de usuario ni un backend
 
 | Información | Almacenamiento |
 | --- | --- |
-| API keys | `SecretStorage` de VS Code, protegido por el mecanismo seguro del sistema operativo |
-| Proveedor, modelo, idioma, apariencia y MCP | `globalState` local de VS Code |
+| API keys | `SecretStorage` de VS Code, protegido por el sistema operativo. Nunca se envían a la interfaz |
+| Proveedor, modelo, idioma, apariencia, verificación y MCP | `globalState` local de VS Code |
 | Historial, memoria editable, memoria automática y checkpoints | `workspaceState` local, separado por workspace |
-| Índice y perfil del proyecto | Procesados localmente por la extensión |
+| Skills y agentes personalizados | Archivos del proyecto en `.qapi/` |
 
-Al enviar un mensaje, QAPI transmite al proveedor configurado el prompt y el contexto de proyecto necesario para producir la respuesta. Ese tratamiento se rige por las políticas del proveedor elegido. Con Ollama, el procesamiento puede mantenerse local si la instalación y los modelos también son locales.
+Al enviar un mensaje, QAPI transmite al proveedor configurado el prompt y el contexto necesario. Antes, oculta los valores de contraseñas, tokens, claves privadas y credenciales en URLs; al escribir archivos los restaura, para no corromper credenciales de prueba. QAPI no lee ni envía archivos `.env`, `credentials*`, `secrets*`, claves (`.pem`, `.key`) ni el contenido de `.git`. Con Ollama, el procesamiento puede mantenerse local.
 
 Los servidores MCP son procesos externos a QAPI. Revisa su código, permisos y política de datos antes de habilitarlos.
-
-Nunca publiques archivos `.env`, credenciales, tokens ni un VSIX modificado que contenga secretos.
 
 ## Comandos de VS Code
 
@@ -222,27 +234,28 @@ Disponibles desde la Command Palette:
 QAPI utiliza TypeScript y dos bundles independientes construidos con esbuild:
 
 - **Extension host (`dist/extension.js`):** integración con VS Code, almacenamiento, contexto, proveedores, herramientas y ejecución.
-- **Webview (`dist/webview.js`):** interfaz del Agente, Configuración y Sobre Centyc.
-
-Componentes principales:
+- **Webview (`dist/webview.js`):** interfaz de todas las pestañas.
 
 | Archivo | Responsabilidad |
 | --- | --- |
 | `src/extension.ts` | Activación, vista lateral, comandos e índice del workspace |
 | `src/panel.ts` | Coordinación entre webview, Store, agente y servicios |
-| `src/agent.ts` | Prompts, modos Chat/Plan y orquestación de tools locales/MCP |
-| `src/projectIndex.ts` | Índice léxico, hashes, mapa del repositorio y recuperación de contexto |
-| `src/investigationMemory.ts` | Caché automática, relevancia, reutilización e invalidación de investigaciones |
-| `src/projectProfile.ts` | Detección de stack, BDD y comandos del proyecto |
+| `src/agent.ts` | Prompts, bucle de herramientas, verificación de archivos afirmados y orquestación de tools locales/MCP |
+| `src/providers.ts` | Integraciones con Gemini, Claude, OpenAI y Ollama, con timeouts y cancelación |
+| `src/skills.ts` | Formato, almacenamiento y selección de skills |
+| `src/secretVault.ts` | Redacción reversible de secretos |
+| `src/projectIndex.ts` | Índice léxico incremental, búsqueda, steps y convenciones Gherkin |
+| `src/investigationMemory.ts` | Caché automática de investigaciones validada por hash |
+| `src/projectProfile.ts` | Detección de stack, frameworks y manifiestos |
 | `src/ideContext.ts` | Archivo activo, selección, Problems, Git, artefactos e impacto |
-| `src/changes.ts` | Diffs, hunks, aplicación selectiva, hashes y checkpoints |
-| `src/execution.ts` | Propuestas, validación y ejecución controlada de comandos |
-| `src/mcp.ts` | Parseo y validación de configuración MCP |
-| `src/mcpRuntime.ts` | Inicio efímero y llamadas a servidores MCP por `stdio` |
+| `src/changes.ts` | Diffs, hunks, aplicación selectiva, verificación en disco y checkpoints |
+| `src/execution.ts` | Ejecución controlada de comandos y comando de verificación |
+| `src/verification.ts` | Verificación tras aplicar y corrección automática acotada |
+| `src/mcp.ts` / `src/mcpRuntime.ts` | Configuración, pool de servidores y llamadas MCP por `stdio` |
+| `src/customAgents.ts` | Agentes personalizados |
 | `src/traceability.ts` | Trazabilidad estática y detección de gaps |
-| `src/store.ts` | Preferencias globales, secretos y estado por workspace |
-| `src/providers.ts` | Integraciones con Gemini, Claude, OpenAI y Ollama |
-| `src/contextWindow.ts` | Estimación de uso y resumen de conversaciones extensas |
+| `src/store.ts` | Preferencias, secretos y estado por workspace |
+| `src/contextWindow.ts` | Límites de contexto y resumen de conversaciones extensas |
 | `src/webview/main.ts` | UI, localización y eventos del webview |
 | `media/webview.css` | Temas, layout y componentes visuales |
 
@@ -272,15 +285,8 @@ Pulsa `F5` en VS Code para abrir una ventana **Extension Development Host** con 
 npm run typecheck   # TypeScript del host y del webview
 npm run build       # Bundle de producción
 npm run watch       # Recompilación durante desarrollo
+npm run package     # Genera qa-pi.vsix
 ```
-
-### Crear el VSIX
-
-```bash
-npx --yes @vscode/vsce package --allow-missing-repository
-```
-
-El archivo resultante se crea en la raíz del proyecto.
 
 ## Contribuir
 

@@ -26,6 +26,8 @@ export interface ProviderConfig {
   baseUrl?: string
   /** Límite real de contexto del modelo (tokens), si la API lo expuso. */
   contextLimit?: number
+  /** Sólo hacia la webview: hay una key guardada en SecretStorage (la key nunca se envía). */
+  hasStoredKey?: boolean
 }
 
 export interface McpServerDef {
@@ -54,6 +56,8 @@ export interface Settings {
   provider: ProviderConfig
   mcpJson: string
   mcpEnabled: Record<string, boolean>
+  /** Ejecuta las tools de los servidores MCP activos sin pedir confirmación en cada llamada. */
+  mcpAutoApprove: boolean
   theme: UiTheme
   fontSize: number
   configured: boolean
@@ -64,9 +68,19 @@ export interface Settings {
    * además corrige y reintenta cuando la validación falla.
    */
   verification: VerificationMode
+  /**
+   * Comando de verificación definido por el usuario. Admite `{tests}` (sólo los
+   * archivos de prueba cambiados) y `{files}` (todos los archivos cambiados).
+   * Vacío: no se verifica nada; QAPI nunca elige la suite por su cuenta.
+   */
+  verificationCommand: string
 }
 
-export type VerificationMode = 'off' | 'validate' | 'autofix'
+/**
+ * `off` no verifica; `propose` deja el comando listo para que el usuario lo
+ * ejecute; `validate` lo ejecuta tras aplicar; `autofix` además corrige y reintenta.
+ */
+export type VerificationMode = 'off' | 'propose' | 'validate' | 'autofix'
 
 export interface IdeDiagnostic {
   path: string
@@ -207,6 +221,33 @@ export interface CustomAgentDefinition {
   builtIn?: boolean
 }
 
+/**
+ * Cuándo entra una skill al contexto del agente:
+ * - `auto`: el agente ve el nombre y la descripción y la carga con load_skill si le sirve.
+ * - `always`: en todos los mensajes.
+ * - `fileMatch`: cuando hay archivos en juego que coinciden con el glob.
+ * - `event`: ante un evento (resultado de prueba, preparar un archivo).
+ * - `manual`: sólo con `#skill:nombre`.
+ */
+export type SkillActivation = 'auto' | 'always' | 'fileMatch' | 'event' | 'manual'
+/** `testResult`: se obtuvo un resultado de prueba. `beforeWrite`: el agente prepara un archivo. */
+export type SkillEvent = 'testResult' | 'beforeWrite'
+
+export interface SkillDefinition {
+  slug: string
+  name: string
+  /** En modo `auto` es lo que el agente lee para decidir si la usa. */
+  description: string
+  activation: SkillActivation
+  /** Glob para `fileMatch` y, opcionalmente, para el evento `beforeWrite`. */
+  fileMatchPattern?: string
+  events?: SkillEvent[]
+  /** Sólo aplica en proyectos con alguno de estos frameworks o lenguajes. Vacío: todos. */
+  frameworks?: string[]
+  instructions: string
+  enabled: boolean
+}
+
 export type SpecDocumentKind = 'requirements' | 'design' | 'tasks'
 export type SpecPhase = 'requirements' | 'design' | 'tasks' | 'execution' | 'done'
 
@@ -264,6 +305,8 @@ export interface InvestigationMemory {
 }
 
 export interface ChatTurn {
+  /** Identidad estable (el índice cambia al recortar o compactar el historial). */
+  id?: string
   role: 'user' | 'assistant'
   text: string
   mode?: AgentMode
@@ -295,9 +338,10 @@ export type ToHost =
   | { type: 'ready' }
   | { type: 'sendMessage'; text: string; mode?: AgentMode }
   | { type: 'clearChat' }
-  | { type: 'applyProposals'; turnIndex: number; selections: ProposalSelection[] }
-  | { type: 'undoProposals'; turnIndex: number; proposals: FileProposal[] }
-  | { type: 'runCommand'; turnIndex: number; commandId: string }
+  | { type: 'cancel' }
+  | { type: 'applyProposals'; turnIndex: number; turnId?: string; selections: ProposalSelection[] }
+  | { type: 'undoProposals'; turnIndex: number; turnId?: string; proposals: FileProposal[] }
+  | { type: 'runCommand'; turnIndex: number; turnId?: string; commandId: string }
   | { type: 'undoCheckpoint'; checkpointId: string }
   | { type: 'saveMemory'; text: string }
   | { type: 'analyzeImpact' }
@@ -319,6 +363,14 @@ export type ToHost =
   | { type: 'toggleMcp'; name: string; enabled: boolean }
   | { type: 'validateMcp'; json: string }
   | { type: 'saveMcpJson'; json: string }
+  | { type: 'probeMcp'; name: string }
+  | { type: 'listModels' }
+  | { type: 'suggestVerificationCommand' }
+  | { type: 'refreshSkills' }
+  | { type: 'saveSkill'; skill: SkillDefinition; previousSlug?: string }
+  | { type: 'deleteSkill'; slug: string }
+  | { type: 'toggleSkill'; slug: string; enabled: boolean }
+  | { type: 'openSkillFile'; slug: string }
   | { type: 'reindex' }
 
 export interface ContextUsage {
@@ -336,14 +388,41 @@ export type ToWebview =
   | { type: 'assistantStart' }
   | { type: 'assistantChunk'; text: string }
   | { type: 'assistantDone'; turn: ChatTurn; usage: ContextUsage }
+  /** Falla que termina la operación en curso (apaga el indicador de "pensando"). */
   | { type: 'error'; message: string }
+  /** Aviso no fatal: la operación en curso continúa. */
+  | { type: 'notice'; message: string }
+  /** Fin de una petición al agente, con o sin resultado (también tras cancelar o fallar). */
+  | { type: 'assistantEnd'; cancelled?: boolean }
+  /** Devuelve al compositor un texto cuyo envío falló. */
+  | { type: 'restoreDraft'; text: string }
+  | { type: 'openSettings' }
   | { type: 'validationResult'; ok: boolean; models: string[]; limits?: Record<string, number>; message?: string }
   | { type: 'indexStatus'; indexing: boolean; files: number }
   | { type: 'summarized'; usage: ContextUsage }
   | { type: 'mcpValidation'; result: McpValidation }
+  | { type: 'models'; provider: ProviderId; models: string[]; limits?: Record<string, number>; message?: string }
+  | { type: 'verificationSuggestion'; command?: string }
+  | {
+    type: 'skills'
+    skills: SkillDefinition[]
+    templates: SkillDefinition[]
+    /** Frameworks y lenguajes detectados en el proyecto, para el filtro visual. */
+    detected: string[]
+    trusted: boolean
+  }
+  | {
+    type: 'mcpProbe'
+    name: string
+    ok: boolean
+    tools: { name: string; description?: string }[]
+    message?: string
+    durationMs: number
+  }
   | { type: 'toolProgress'; tool: string; detail: string }
-  | { type: 'executionProgress'; command: string }
-  | { type: 'memory'; text: string }
+  /** `automatic`: lo lanzó la verificación tras aplicar cambios, no una aprobación del usuario. */
+  | { type: 'executionProgress'; command: string; automatic?: boolean }
+  | { type: 'memory'; text: string; silent?: boolean }
   | { type: 'checkpoints'; checkpoints: Checkpoint[] }
   | { type: 'traceability'; summary: TraceabilitySummary }
   | { type: 'specs'; specs: SpecSummary[] }

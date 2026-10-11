@@ -6,9 +6,11 @@
 // libre del modelo.
 import * as vscode from 'vscode'
 import { ProjectIndex } from './projectIndex'
+import { listSkills } from './skills'
 import { IdeContextSnapshot } from './types'
 
-const REFERENCE_RE = /#(file|folder|problems|gitDiff|steering)(?::([^\s#]+))?/gi
+// `\b` tras el tipo: `#filesystem` ya no se interpreta como `#file`.
+const REFERENCE_RE = /#(file|folder|problems|gitDiff|steering|skill)\b(?::([^\s#]+))?/gi
 const MAX_FILE_CHARS = 20_000
 const MAX_FOLDER_ENTRIES = 60
 const MAX_TOTAL_CHARS = 40_000
@@ -22,6 +24,8 @@ export interface ResolvedContextRefs {
   missing: string[]
   /** Nombres de steering pedidos manualmente. */
   steeringNames: string[]
+  /** Skills pedidas con `#skill:nombre`. */
+  skillNames: string[]
 }
 
 export function hasContextRefs(instruction: string): boolean {
@@ -36,19 +40,21 @@ export async function resolveContextRefs(
 ): Promise<ResolvedContextRefs> {
   REFERENCE_RE.lastIndex = 0
   const matches = [...instruction.matchAll(REFERENCE_RE)].slice(0, MAX_REFERENCES)
-  const empty: ResolvedContextRefs = { text: '', sources: [], missing: [], steeringNames: [] }
+  const empty: ResolvedContextRefs = { text: '', sources: [], missing: [], steeringNames: [], skillNames: [] }
   if (!matches.length) return empty
 
   const sections: string[] = []
   const sources: string[] = []
   const missing: string[] = []
   const steeringNames: string[] = []
+  const skillNames: string[] = []
   const seen = new Set<string>()
   let budget = MAX_TOTAL_CHARS
 
   for (const match of matches) {
     const kind = match[1].toLowerCase()
-    const target = match[2]?.trim()
+    // "revisa #file:src/a.ts." → la puntuación final no forma parte de la ruta.
+    const target = match[2]?.trim().replace(/[.,;:!?)\]}'"]+$/, '') || undefined
     const key = `${kind}:${target || ''}`
     if (seen.has(key)) continue
     seen.add(key)
@@ -56,6 +62,11 @@ export async function resolveContextRefs(
     if (kind === 'steering') {
       if (target) steeringNames.push(target)
       else missing.push('#steering')
+      continue
+    }
+    if (kind === 'skill') {
+      if (target) skillNames.push(target)
+      else missing.push('#skill')
       continue
     }
 
@@ -78,6 +89,7 @@ export async function resolveContextRefs(
     sources,
     missing,
     steeringNames,
+    skillNames,
   }
 }
 
@@ -117,7 +129,9 @@ async function resolveOne(
   if (kind === 'folder') {
     const prefix = normalize(target)
     if (prefix === undefined) return undefined
-    const files = index.listFiles(prefix, MAX_FOLDER_ENTRIES)
+    // Con "/" final: `#folder:src` ya no incluye `src2/`.
+    const folderPrefix = prefix && !prefix.endsWith('/') ? `${prefix}/` : prefix
+    const files = index.listFiles(folderPrefix, MAX_FOLDER_ENTRIES)
     if (!files.length) return undefined
     return {
       text: `CARPETA SOLICITADA ${prefix || '/'} (${files.length} archivo(s)):\n${files.join('\n')}`,
@@ -151,7 +165,11 @@ export async function suggestContextRefs(index: ProjectIndex, query: string): Pr
   }
 
   const steering = await steeringSuggestions(normalized)
-  return [...suggestions, ...steering, ...files, ...[...folders]].slice(0, 40)
+  const skills = (await listSkills())
+    .map((skill) => `#skill:${skill.slug}`)
+    .filter((item) => !normalized || item.toLowerCase().includes(normalized))
+    .slice(0, 10)
+  return [...suggestions, ...skills, ...steering, ...files, ...[...folders]].slice(0, 40)
 }
 
 async function steeringSuggestions(query: string): Promise<string[]> {

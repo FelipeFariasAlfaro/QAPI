@@ -114,13 +114,24 @@ export function registerHooks(runner: HookRunner): vscode.Disposable {
   })
 }
 
+const matcherCache = new Map<string, RegExp | null>()
+
 function matches(hook: HookDefinition, relativePath: string): boolean {
   if (!hook.matcher) return true
-  try {
-    return new RegExp(hook.matcher).test(relativePath)
-  } catch {
-    return false
+  const re = compileMatcher(hook.matcher)
+  return re ? re.test(relativePath) : false
+}
+
+/** Compilado una vez por patrón; los cuantificadores anidados (ReDoS) se rechazan. */
+function compileMatcher(source: string): RegExp | null {
+  if (matcherCache.has(source)) return matcherCache.get(source)!
+  let compiled: RegExp | null = null
+  if (!/\([^)]*[+*][^)]*\)\s*[+*{]/.test(source)) {
+    try { compiled = new RegExp(source) } catch { compiled = null }
   }
+  if (matcherCache.size > 200) matcherCache.clear()
+  matcherCache.set(source, compiled)
+  return compiled
 }
 
 function normalizeFile(parsed: any): HookDefinition[] {

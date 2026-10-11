@@ -2,7 +2,8 @@
 import { renderMarkdown } from './markdown'
 import type {
   AgentMode, ChatTurn, Checkpoint, ContextUsage, CustomAgentDefinition, CustomAgentOutputMode, DiffHunk,
-  ExecutionRun, FileProposal, McpValidation, ProviderId, Settings, SpecPhase, SpecSummary, SpecTask, ToWebview,
+  ExecutionRun, FileProposal, McpValidation, ProviderId, Settings, SkillActivation, SkillDefinition, SkillEvent,
+  SpecPhase, SpecSummary, SpecTask, ToWebview,
   TraceabilitySummary, UiLanguage, UiTheme, VerificationMode,
 } from '../types'
 
@@ -36,7 +37,7 @@ const THEME_CLASSES = THEME_OPTIONS.map(([value]) => `theme-${value}`)
 const FONT_MIN = 9
 const FONT_MAX = 18
 
-type TabId = 'chat' | 'agents' | 'settings' | 'centyc'
+type TabId = 'chat' | 'agents' | 'skills' | 'mcp' | 'settings' | 'centyc'
 type SelectionState = Record<string, Record<string, string[]>>
 interface ProviderDraftState {
   provider: ProviderId
@@ -59,7 +60,7 @@ let settings: Settings | null = null
 let history: ChatTurn[] = []
 let projectName = ''
 let usage: ContextUsage | null = null
-let tab: TabId = saved.tab === 'settings' || saved.tab === 'centyc' || saved.tab === 'agents' ? saved.tab : 'chat'
+let tab: TabId = (['settings', 'centyc', 'agents', 'mcp', 'skills'] as string[]).includes(saved.tab || '') ? saved.tab! : 'chat'
 let thinking = false
 let toolTrace: string[] = []
 let streamedText = ''
@@ -67,7 +68,9 @@ let validation: { ok: boolean; models: string[]; limits?: Record<string, number>
 let draftProvider: Settings['provider'] | null = saved.providerDraft ? { ...saved.providerDraft } : null
 let mcpDraft: string | null = null
 let mcpValidation: McpValidation | null = null
-let mode: AgentMode = saved.mode === 'plan' ? 'plan' : 'chat'
+// Sin selector de modo: el compositor siempre usa el agente. Un 'plan' guardado
+// en el estado local de versiones anteriores se ignora.
+const mode: AgentMode = 'chat'
 let selections: SelectionState = saved.selections || {}
 let composerDraft = saved.composerDraft || ''
 let memory = ''
@@ -88,6 +91,10 @@ let refQueryStart = -1
 const openAccordions = new Set<string>()
 let traceability: TraceabilitySummary | null = null
 let executionCommand = ''
+/** Comando de verificación que el usuario está editando (sin guardar). */
+let verificationDraft: string | null = null
+/** El comando en curso lo lanzó la verificación automática, no el usuario. */
+let executionAutomatic = false
 let indexing = false
 let indexedFiles = 0
 
@@ -140,12 +147,23 @@ window.addEventListener('message', (ev) => {
         projectName = msg.projectName
         render()
         break
-      case 'settings':
+      case 'settings': {
+        const previousProvider = settings?.provider
         settings = msg.settings
-        draftProvider = { ...msg.settings.provider }
+        // El borrador MCP ya quedó guardado: se vuelve a mostrar la versión persistida.
+        if (mcpDraft !== null && mcpDraft === msg.settings.mcpJson) mcpDraft = null
+        // Guardar el tema o la fuente no debe borrar una key o un modelo que el
+        // usuario está escribiendo: el borrador sólo se reemplaza si cambió el
+        // proveedor guardado.
+        if (!draftProvider || !sameProvider(previousProvider, msg.settings.provider)) {
+          draftProvider = { ...msg.settings.provider }
+        } else {
+          draftProvider = { ...draftProvider, hasStoredKey: msg.settings.provider.hasStoredKey }
+        }
         applyTheme()
         render()
         break
+      }
       case 'history':
         history = msg.history
         usage = msg.usage
@@ -160,7 +178,9 @@ window.addEventListener('message', (ev) => {
         break
       case 'assistantChunk':
         streamedText += msg.text
-        render()
+        // Actualización incremental: reconstruir todo el DOM por cada fragmento
+        // causaba lag, perdía el foco del compositor y movía el scroll.
+        if (!updateStreamingNode()) render()
         break
       case 'assistantDone':
         thinking = false
@@ -169,9 +189,28 @@ window.addEventListener('message', (ev) => {
         usage = msg.usage
         render()
         break
+      case 'assistantEnd':
+        if (thinking || streamedText || toolTrace.length) {
+          thinking = false
+          toolTrace = []
+          streamedText = ''
+          render()
+        }
+        break
       case 'toolProgress':
         toolTrace.push(`${msg.tool}: ${msg.detail}`)
-        render()
+        if (toolTrace.length > 50) toolTrace = toolTrace.slice(-50)
+        if (!updateTraceNode()) render()
+        break
+      case 'notice':
+        toast(msg.message)
+        break
+      case 'restoreDraft':
+        if (!composerDraft.trim()) {
+          composerDraft = msg.text
+          saveLocalState()
+          render()
+        }
         break
       case 'summarized':
         usage = msg.usage
@@ -182,8 +221,25 @@ window.addEventListener('message', (ev) => {
         mcpValidation = msg.result
         render()
         break
+      case 'models':
+        chatModels = msg
+        render()
+        break
+      case 'verificationSuggestion':
+        if (msg.command) {
+          verificationDraft = msg.command
+          toast(tr(`Sugerencia: ${msg.command} · revísala y guárdala`, `Suggestion: ${msg.command} · review and save it`))
+        } else {
+          toast(tr('No detecté un framework de pruebas; escribe el comando a mano.', 'No test framework detected; type the command manually.'))
+        }
+        render()
+        break
+      case 'mcpProbe':
+        mcpProbes[msg.name] = { running: false, result: msg }
+        render()
+        break
       case 'error':
-        thinking = false
+        // No apaga "pensando": el host avisa el fin real de la petición con assistantEnd.
         executionCommand = ''
         toast(msg.message)
         render()
@@ -198,11 +254,15 @@ window.addEventListener('message', (ev) => {
       case 'memory':
         memory = msg.text
         memoryDraft = msg.text
-        toast('Memoria actualizada')
+        if (!msg.silent) toast('Memoria actualizada')
         render()
         break
       case 'specs':
         specs = msg.specs
+        render()
+        break
+      case 'skills':
+        skillsState = { skills: msg.skills, templates: msg.templates, detected: msg.detected, trusted: msg.trusted }
         render()
         break
       case 'customAgents':
@@ -228,13 +288,17 @@ window.addEventListener('message', (ev) => {
         break
       case 'executionProgress':
         executionCommand = msg.command
+        executionAutomatic = Boolean(msg.automatic)
         render()
         break
-      case 'indexStatus':
+      case 'indexStatus': {
         indexing = msg.indexing
         indexedFiles = msg.files
-        render()
+        const badge = root.querySelector<HTMLElement>('.index-badge')
+        if (badge) badge.textContent = translateUiText(indexing ? 'Indexando…' : `${indexedFiles} archivos`)
+        else render()
         break
+      }
       case 'openSettings':
         tab = 'settings'
         render()
@@ -260,6 +324,75 @@ function applyTheme() {
 // ── Render ──────────────────────────────────────────────────────────────────
 
 function render() {
+  // render() reconstruye el DOM: se conserva el foco y la selección del campo
+  // activo (p. ej. el compositor) para poder escribir mientras llega una respuesta.
+  const active = document.activeElement as (HTMLInputElement | HTMLTextAreaElement | null)
+  const focusId = active && root.contains(active) && active.id ? active.id : ''
+  const selection = focusId && 'selectionStart' in active!
+    ? { start: active!.selectionStart, end: active!.selectionEnd }
+    : undefined
+  rememberMessagesScroll()
+  renderInner()
+  if (focusId) {
+    const target = document.getElementById(focusId) as HTMLInputElement | HTMLTextAreaElement | null
+    if (target) {
+      target.focus({ preventScroll: true })
+      if (selection && selection.start !== null && typeof target.setSelectionRange === 'function') {
+        try { target.setSelectionRange(selection.start, selection.end ?? selection.start) } catch { /* tipo sin selección */ }
+      }
+    }
+  }
+}
+
+/** Posición del historial: sólo se baja al final si el usuario ya estaba abajo. */
+const messagesScroll = { top: 0, atBottom: true }
+function rememberMessagesScroll() {
+  const current = root.querySelector<HTMLElement>('.messages')
+  if (!current) return
+  messagesScroll.top = current.scrollTop
+  messagesScroll.atBottom = current.scrollHeight - current.scrollTop - current.clientHeight < 40
+}
+function restoreMessagesScroll(msgs: HTMLElement) {
+  if (messagesScroll.atBottom) msgs.scrollTop = msgs.scrollHeight
+  else msgs.scrollTop = messagesScroll.top
+}
+
+/** Actualiza sólo el texto en streaming. Devuelve false si hace falta un render completo. */
+function updateStreamingNode(): boolean {
+  if (tab !== 'chat' || !thinking) return false
+  const node = root.querySelector<HTMLElement>('.streaming-content')
+  if (!node) return false
+  const msgs = root.querySelector<HTMLElement>('.messages')
+  const atBottom = msgs ? msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 40 : false
+  node.textContent = streamedText
+  if (msgs && atBottom) msgs.scrollTop = msgs.scrollHeight
+  return true
+}
+
+/** Actualiza sólo las líneas de progreso de herramientas. */
+function updateTraceNode(): boolean {
+  if (tab !== 'chat' || !thinking || streamedText) return false
+  const box = root.querySelector<HTMLElement>('.tool-trace')
+  if (!box) return false
+  box.replaceChildren(...traceLines())
+  const label = root.querySelector<HTMLElement>('.thinking-label')
+  if (label) label.textContent = translateUiText(toolTrace.length ? 'Investigando el proyecto…' : 'Pensando…')
+  return true
+}
+
+function traceLines(): HTMLElement[] {
+  return toolTrace.slice(-6).map((line) => {
+    const trace = div('tool-line')
+    trace.textContent = `↳ ${line}`
+    return trace
+  })
+}
+
+function sameProvider(a: Settings['provider'] | undefined, b: Settings['provider']): boolean {
+  return Boolean(a) && a!.provider === b.provider && a!.model === b.model && a!.baseUrl === b.baseUrl
+}
+
+function renderInner() {
   root.innerHTML = ''
   if (!settings) {
     const loading = div('empty')
@@ -275,6 +408,8 @@ function render() {
   root.appendChild(
     tab === 'chat' ? chatView()
       : tab === 'agents' ? agentsView()
+      : tab === 'mcp' ? mcpView()
+      : tab === 'skills' ? skillsView()
       : tab === 'settings' ? settingsView()
       : centycView(),
   )
@@ -316,6 +451,8 @@ function tabsBar(): HTMLElement {
   const el = div('tabs')
   el.appendChild(tabBtn('chat', 'Agente QAPI'))
   el.appendChild(tabBtn('agents', 'Agentes'))
+  el.appendChild(tabBtn('skills', 'Skills'))
+  el.appendChild(tabBtn('mcp', 'MCP'))
   el.appendChild(tabBtn('settings', 'Configuración'))
   el.appendChild(tabBtn('centyc', 'Sobre Centyc'))
   return el
@@ -362,7 +499,7 @@ function chatView(): HTMLElement {
     if (streamedText) {
       const streaming = div('msg assistant')
       const streamingBubble = div('bubble')
-      const streamingContent = div('message-content')
+      const streamingContent = div('message-content streaming-content')
       streamingContent.textContent = streamedText
       streamingBubble.appendChild(streamingContent)
       streamingBubble.appendChild(div('stream-caret'))
@@ -371,29 +508,21 @@ function chatView(): HTMLElement {
     } else {
       const t = div('thinking')
       t.appendChild(div('dot-spin'))
-      t.appendChild(document.createTextNode(toolTrace.length ? 'Investigando el proyecto…' : 'Pensando…'))
+      const label = document.createElement('span')
+      label.className = 'thinking-label'
+      label.textContent = toolTrace.length ? 'Investigando el proyecto…' : 'Pensando…'
+      t.appendChild(label)
       msgs.appendChild(t)
-      for (const line of toolTrace.slice(-6)) {
-        const trace = div('tool-line')
-        trace.textContent = `↳ ${line}`
-        msgs.appendChild(trace)
-      }
+      const trace = div('tool-trace')
+      trace.append(...traceLines())
+      msgs.appendChild(trace)
     }
   }
   view.appendChild(msgs)
 
   const composer = div('composer')
-  const modeSelect = document.createElement('select')
-  modeSelect.className = 'mode-select'
-  for (const [value, label] of [['chat', 'Agente'], ['plan', 'Plan QA']] as const) {
-    const option = document.createElement('option')
-    option.value = value
-    option.textContent = label
-    option.selected = mode === value
-    modeSelect.appendChild(option)
-  }
-  modeSelect.onchange = () => { mode = modeSelect.value as AgentMode; saveLocalState() }
   const ta = document.createElement('textarea')
+  ta.id = 'composer-input'
   ta.placeholder = mode === 'plan'
     ? 'Describe el objetivo del plan QA…'
     : 'Escribe tu consulta o petición… usa # para añadir contexto'
@@ -423,16 +552,105 @@ function chatView(): HTMLElement {
     }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendComposer(ta) }
   }
-  const sendButton = button('Enviar', 'btn btn-primary', () => sendComposer(ta))
-  sendButton.disabled = thinking
-  composer.appendChild(modeSelect)
+  // Mientras hay una petición o un comando en curso, el botón pasa a "Detener".
+  const busy = thinking || Boolean(executionCommand)
+  const sendButton = busy
+    ? button('Detener', 'btn btn-danger btn-sm', () => post({ type: 'cancel' }))
+    : button('Enviar', 'btn btn-primary btn-sm', () => sendComposer(ta))
+  if (busy) sendButton.title = 'Detener la solicitud en curso'
+
+  const footer = div('composer-footer')
+  footer.appendChild(modelPicker(busy))
+  footer.appendChild(div('spacer'))
+  const mcpSwitch = mcpAutoApproveSwitch()
+  if (mcpSwitch) footer.appendChild(mcpSwitch)
+  footer.appendChild(sendButton)
   composer.appendChild(ta)
-  composer.appendChild(sendButton)
+  composer.appendChild(footer)
   if (refSuggestions.length) view.appendChild(contextRefList(ta))
   view.appendChild(composer)
 
-  setTimeout(() => { msgs.scrollTop = msgs.scrollHeight }, 0)
+  msgs.addEventListener('scroll', () => {
+    messagesScroll.top = msgs.scrollTop
+    messagesScroll.atBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 40
+  })
+  setTimeout(() => restoreMessagesScroll(msgs), 0)
   return view
+}
+
+/** Modelos del proveedor guardado, pedidos al host una vez por proveedor. */
+let chatModels: Extract<ToWebview, { type: 'models' }> | null = null
+let modelsRequestedFor = ''
+
+/** Selector de modelo en el chat: cambia el modelo guardado sin ir a Configuración. */
+function modelPicker(busy: boolean): HTMLElement {
+  const current = settings!.provider
+  if (current.provider !== modelsRequestedFor && settings!.configured) {
+    modelsRequestedFor = current.provider
+    post({ type: 'listModels' })
+  }
+  const models = chatModels?.provider === current.provider ? [...chatModels.models] : []
+  if (current.model && !models.includes(current.model)) models.unshift(current.model)
+
+  const select = document.createElement('select')
+  select.id = 'composer-model'
+  select.className = 'model-select'
+  select.title = chatModels?.message
+    ? tr(`No pude listar los modelos: ${chatModels.message}`, `Could not list models: ${chatModels.message}`)
+    : tr('Modelo para los próximos mensajes', 'Model for the next messages')
+  if (!models.length) {
+    const option = document.createElement('option')
+    option.textContent = tr('Sin modelo', 'No model')
+    select.appendChild(option)
+    select.disabled = true
+    return select
+  }
+  for (const model of models) {
+    const option = document.createElement('option')
+    option.value = model
+    option.textContent = model
+    option.selected = model === current.model
+    select.appendChild(option)
+  }
+  // Se cambia entre mensajes: la respuesta en curso ya usa el modelo con el que empezó.
+  select.disabled = busy
+  select.onchange = () => {
+    if (!settings) return
+    const model = select.value
+    const contextLimit = chatModels?.limits?.[model]
+    settings = { ...settings, provider: { ...settings.provider, model, contextLimit } }
+    post({
+      type: 'saveSettings',
+      settings: { provider: { provider: current.provider, baseUrl: current.baseUrl, model, contextLimit } },
+    })
+    toast(tr(`Modelo: ${model}`, `Model: ${model}`))
+  }
+  return select
+}
+
+/** Switch de autoaprobación MCP; sólo aparece si hay algún servidor activo. */
+function mcpAutoApproveSwitch(): HTMLElement | undefined {
+  if (!Object.values(settings!.mcpEnabled).some(Boolean)) return undefined
+  const label = document.createElement('label')
+  label.className = 'toggle'
+  label.title = tr(
+    'Ejecuta las tools de los servidores MCP activos sin pedir confirmación en cada llamada. Úsalo sólo con servidores confiables.',
+    'Runs tools from enabled MCP servers without asking for confirmation on each call. Use it only with trusted servers.',
+  )
+  const input = document.createElement('input')
+  input.type = 'checkbox'
+  input.id = 'composer-mcp-auto'
+  input.checked = Boolean(settings!.mcpAutoApprove)
+  input.setAttribute('role', 'switch')
+  input.onchange = () => {
+    if (!settings) return
+    settings = { ...settings, mcpAutoApprove: input.checked }
+    post({ type: 'saveSettings', settings: { mcpAutoApprove: input.checked } })
+  }
+  const text = document.createElement('span')
+  text.textContent = 'Autoaprobar MCP'
+  label.append(text, input)
+  return label
 }
 
 function sendComposer(ta: HTMLTextAreaElement) {
@@ -448,6 +666,8 @@ function sendComposer(ta: HTMLTextAreaElement) {
 function sendText(text: string, messageMode: AgentMode) {
   if (!text.trim() || thinking) return
   tab = 'chat'
+  // Al enviar, el usuario quiere ver la respuesta: se vuelve al final del historial.
+  messagesScroll.atBottom = true
   post({ type: 'sendMessage', text, mode: messageMode })
 }
 
@@ -472,13 +692,17 @@ function fontControls(): HTMLElement {
   return wrap
 }
 
+let fontSaveTimer: ReturnType<typeof setTimeout> | undefined
 function changeFontSize(delta: number) {
   if (!settings) return
   const next = Math.max(FONT_MIN, Math.min(FONT_MAX, (settings.fontSize || 13) + delta))
   if (next === settings.fontSize) return
   settings = { ...settings, fontSize: next }
   document.documentElement.style.setProperty('--qp-font', `${next}px`)
-  post({ type: 'saveSettings', settings: { fontSize: next } })
+  // Clics rápidos se agrupan en un solo guardado: evita que respuestas
+  // intermedias del host devuelvan un tamaño viejo.
+  if (fontSaveTimer) clearTimeout(fontSaveTimer)
+  fontSaveTimer = setTimeout(() => post({ type: 'saveSettings', settings: { fontSize: settings?.fontSize ?? next } }), 300)
   render()
 }
 
@@ -614,6 +838,12 @@ function agentFreeTextInput(agent: CustomAgentDefinition): HTMLElement {
   fileInput.onchange = async () => {
     const file = fileInput.files?.[0]
     if (!file) return
+    // Un archivo enorme congelaba la webview; el host igual recorta a ~200k caracteres.
+    if (file.size > 1024 * 1024) {
+      toast(tr('El archivo supera 1 MB; adjunta un extracto.', 'The file exceeds 1 MB; attach an excerpt.'))
+      fileInput.value = ''
+      return
+    }
     const text = await file.text()
     agentFreeText[agent.slug] = text
     saveLocalState()
@@ -1048,7 +1278,7 @@ function bubble(turn: ChatTurn, index: number): HTMLElement {
     ok.textContent = '✓ Cambios aplicados'
     state.appendChild(ok)
     if (turn.checkpointId) state.appendChild(linkBtn('Deshacer', () => post({ type: 'undoCheckpoint', checkpointId: turn.checkpointId! })))
-    else if (turn.proposals) state.appendChild(linkBtn('Deshacer', () => post({ type: 'undoProposals', turnIndex: index, proposals: turn.proposals! })))
+    else if (turn.proposals) state.appendChild(linkBtn('Deshacer', () => post({ type: 'undoProposals', turnIndex: index, turnId: turn.id, proposals: turn.proposals! })))
     content.appendChild(state)
   }
   if (turn.undone) {
@@ -1126,11 +1356,13 @@ function proposalsView(turn: ChatTurn, turnIndex: number): HTMLElement {
 
   const actions = div('proposal-actions')
   const applySelected = button('Aplicar seleccionados', 'btn btn-primary btn-sm', () => {
-    post({ type: 'applyProposals', turnIndex, selections: proposalSelections(turnIndex, eligible, false) })
+    disableWhileApplying(applySelected, applyAll)
+    post({ type: 'applyProposals', turnIndex, turnId: turnId(turnIndex), selections: proposalSelections(turnIndex, eligible, false) })
   })
   applySelected.disabled = selected === 0
   const applyAll = button('Aplicar todo', 'btn btn-ghost btn-sm', () => {
-    post({ type: 'applyProposals', turnIndex, selections: proposalSelections(turnIndex, eligible, true) })
+    disableWhileApplying(applySelected, applyAll)
+    post({ type: 'applyProposals', turnIndex, turnId: turnId(turnIndex), selections: proposalSelections(turnIndex, eligible, true) })
   })
   applyAll.disabled = total === 0
   actions.appendChild(applySelected)
@@ -1139,8 +1371,13 @@ function proposalsView(turn: ChatTurn, turnIndex: number): HTMLElement {
   return box
 }
 
+/** Evita el doble clic mientras el host aplica; el siguiente render los rehabilita. */
+function disableWhileApplying(...buttons: HTMLButtonElement[]) {
+  for (const item of buttons) item.disabled = true
+}
+
 function proposalDiff(proposal: FileProposal, turnIndex: number, selectable: boolean): HTMLElement {
-  const details = document.createElement('details')
+  const details = trackOpen(document.createElement('details'), `prop:${turnKey(turnIndex)}:${proposal.path}`)
   details.className = 'prop'
   const summary = document.createElement('summary')
   const info = div('prop-summary-info')
@@ -1152,7 +1389,7 @@ function proposalDiff(proposal: FileProposal, turnIndex: number, selectable: boo
   info.appendChild(meta)
 
   if (selectable && isSelectableProposal(proposal)) {
-    const ids = selections[String(turnIndex)]?.[proposal.id!] || []
+    const ids = selections[turnKey(turnIndex)]?.[proposal.id!] || []
     const fileCheck = checkbox(ids.length === proposal.hunks!.length, () => {
       setProposalSelection(turnIndex, proposal.id!, fileCheck.checked ? proposal.hunks!.map((h) => h.id) : [])
       render()
@@ -1184,9 +1421,9 @@ function hunkView(proposal: FileProposal, hunk: DiffHunk, turnIndex: number, sel
   const block = div('diff-hunk')
   const header = div('hunk-header')
   if (selectable) {
-    const selected = selections[String(turnIndex)]?.[proposal.id!] || []
+    const selected = selections[turnKey(turnIndex)]?.[proposal.id!] || []
     const control = checkbox(selected.includes(hunk.id), () => {
-      const next = new Set(selections[String(turnIndex)]?.[proposal.id!] || [])
+      const next = new Set(selections[turnKey(turnIndex)]?.[proposal.id!] || [])
       if (control.checked) next.add(hunk.id)
       else next.delete(hunk.id)
       setProposalSelection(turnIndex, proposal.id!, proposal.hunks!.filter((item) => next.has(item.id)).map((item) => item.id))
@@ -1241,11 +1478,29 @@ function visibleHunks(proposal: FileProposal): DiffHunk[] {
   }]
 }
 
+/** Clave estable de un turno: su id (los índices cambian al recortar el historial). */
+function turnKey(turnIndex: number): string {
+  return history[turnIndex]?.id || String(turnIndex)
+}
+function turnId(turnIndex: number): string | undefined {
+  return history[turnIndex]?.id
+}
+
+/** Recuerda si un <details> estaba abierto entre renders completos. */
+function trackOpen(element: HTMLDetailsElement, key: string): HTMLDetailsElement {
+  element.open = openAccordions.has(key)
+  element.addEventListener('toggle', () => {
+    if (element.open) openAccordions.add(key)
+    else openAccordions.delete(key)
+  })
+  return element
+}
+
 function splitPreviewLines(text: string): string[] { return text ? text.replace(/\r\n/g, '\n').split('\n') : [] }
 function isSelectableProposal(proposal: FileProposal): boolean { return Boolean(proposal.id && proposal.hunks?.length) }
 
 function ensureSelectionDefaults(turnIndex: number, proposals: FileProposal[]) {
-  const key = String(turnIndex)
+  const key = turnKey(turnIndex)
   let changed = false
   if (!selections[key]) { selections[key] = {}; changed = true }
   for (const proposal of proposals) {
@@ -1258,7 +1513,7 @@ function ensureSelectionDefaults(turnIndex: number, proposals: FileProposal[]) {
 }
 
 function setProposalSelection(turnIndex: number, proposalId: string, hunkIds: string[]) {
-  const key = String(turnIndex)
+  const key = turnKey(turnIndex)
   selections[key] ||= {}
   selections[key][proposalId] = hunkIds
   saveLocalState()
@@ -1269,13 +1524,13 @@ function setAllSelections(turnIndex: number, proposals: FileProposal[], checked:
 }
 
 function selectedCount(turnIndex: number, proposals: FileProposal[]): number {
-  return proposals.reduce((sum, proposal) => sum + (selections[String(turnIndex)]?.[proposal.id!]?.length || 0), 0)
+  return proposals.reduce((sum, proposal) => sum + (selections[turnKey(turnIndex)]?.[proposal.id!]?.length || 0), 0)
 }
 
 function proposalSelections(turnIndex: number, proposals: FileProposal[], all: boolean) {
   return proposals.map((proposal) => ({
     proposalId: proposal.id!,
-    hunkIds: all ? proposal.hunks!.map((hunk) => hunk.id) : (selections[String(turnIndex)]?.[proposal.id!] || []),
+    hunkIds: all ? proposal.hunks!.map((hunk) => hunk.id) : (selections[turnKey(turnIndex)]?.[proposal.id!] || []),
   }))
 }
 
@@ -1294,7 +1549,12 @@ function commandsView(commands: NonNullable<ChatTurn['commandProposals']>, turnI
     info.appendChild(code)
     info.appendChild(reason)
     item.appendChild(info)
-    item.appendChild(button('Ejecutar', 'btn btn-ghost btn-sm', () => post({ type: 'runCommand', turnIndex, commandId: command.id })))
+    const run = button('Ejecutar', 'btn btn-ghost btn-sm', () => {
+      run.disabled = true
+      post({ type: 'runCommand', turnIndex, turnId: turnId(turnIndex), commandId: command.id })
+    })
+    run.disabled = Boolean(executionCommand)
+    item.appendChild(run)
     box.appendChild(item)
   }
   return box
@@ -1306,7 +1566,7 @@ function runsView(runs: ExecutionRun[]): HTMLElement {
   title.textContent = 'Ejecuciones'
   box.appendChild(title)
   for (const run of runs) {
-    const details = document.createElement('details')
+    const details = trackOpen(document.createElement('details'), `run:${run.id}`)
     details.className = `run run-${run.status}`
     const summary = document.createElement('summary')
     const status = div('run-status')
@@ -1373,11 +1633,28 @@ function executionProgress(command: string): HTMLElement {
   row.appendChild(div('dot-spin'))
   const text = div('execution-text')
   const label = div('execution-label')
-  label.textContent = 'Ejecutando comando aprobado…'
+  label.textContent = executionAutomatic
+    ? 'Verificación automática tras aplicar cambios…'
+    : 'Ejecutando comando aprobado…'
   const code = document.createElement('code')
   code.textContent = command
   text.appendChild(label)
   text.appendChild(code)
+  if (executionAutomatic) {
+    // Deja claro de dónde salió el comando y cómo apagarlo.
+    const hint = div('muted')
+    hint.appendChild(document.createTextNode(tr(
+      'Configuración > Comportamiento > Verificación. ',
+      'Settings > Behavior > Verification. ',
+    )))
+    hint.appendChild(linkBtn(tr('Desactivar', 'Turn off'), () => {
+      if (settings) settings = { ...settings, verification: 'off', autoValidate: false }
+      post({ type: 'saveSettings', settings: { verification: 'off' } })
+      post({ type: 'cancel' })
+      toast(tr('Verificación automática desactivada', 'Automatic verification turned off'))
+    }))
+    text.appendChild(hint)
+  }
   row.appendChild(text)
   return row
 }
@@ -1476,11 +1753,19 @@ function settingsView(): HTMLElement {
     grid.appendChild(option)
   }
   cIa.appendChild(grid)
-  if (providerDef.needsKey) cIa.appendChild(field('API Key', inputEl('password', dp.apiKey || '', (value) => {
-    dp.apiKey = value
-    validation = null
-    saveLocalState()
-  })))
+  if (providerDef.needsKey) {
+    // La key guardada nunca llega a la webview; un campo vacío conserva la existente.
+    const keyInput = inputEl('password', dp.apiKey || '', (value) => {
+      dp.apiKey = value
+      validation = null
+      saveLocalState()
+    })
+    keyInput.placeholder = dp.hasStoredKey
+      ? 'Key guardada · escribe una nueva para reemplazarla'
+      : 'Pega tu API key (si ya hay una guardada, déjalo vacío)'
+    keyInput.autocomplete = 'off'
+    cIa.appendChild(field('API Key', keyInput))
+  }
   if (dp.provider === 'ollama') cIa.appendChild(field('URL de Ollama', inputEl('text', dp.baseUrl || 'http://localhost:11434', (value) => {
     dp.baseUrl = value
     validation = null
@@ -1529,12 +1814,13 @@ function settingsView(): HTMLElement {
   }
   view.appendChild(cIa)
 
-  const cBehavior = card('Comportamiento', 'Verificación opt-in: ejecuta el comando declarado por el proyecto sólo en workspaces confiables.')
+  const cBehavior = card('Comportamiento', 'Tú decides qué verificar tras aplicar cambios. QAPI nunca elige ni ejecuta una suite por su cuenta.')
   const verificationSelect = document.createElement('select')
   const verificationOptions: [VerificationMode, string, string][] = [
     ['off', 'No verificar', 'Do not verify'],
-    ['validate', 'Validar después de aplicar', 'Validate after applying'],
-    ['autofix', 'Validar y corregir automáticamente', 'Validate and fix automatically'],
+    ['propose', 'Proponer el comando (yo lo ejecuto)', 'Propose the command (I run it)'],
+    ['validate', 'Ejecutar el comando después de aplicar', 'Run the command after applying'],
+    ['autofix', 'Ejecutar y corregir automáticamente', 'Run and fix automatically'],
   ]
   for (const [value, es, en] of verificationOptions) {
     const option = document.createElement('option')
@@ -1544,15 +1830,55 @@ function settingsView(): HTMLElement {
     verificationSelect.appendChild(option)
   }
   verificationSelect.onchange = () => {
-    post({ type: 'saveSettings', settings: { verification: verificationSelect.value as VerificationMode } })
+    const verification = verificationSelect.value as VerificationMode
+    if (settings) settings = { ...settings, verification }
+    post({ type: 'saveSettings', settings: { verification } })
+    render()
   }
   cBehavior.appendChild(field('Verificación tras aplicar cambios', verificationSelect))
-  const verificationHint = div('muted')
-  verificationHint.textContent = tr(
-    'Con corrección automática, QAPI reintenta hasta 3 veces y se detiene si el error no avanza.',
-    'With automatic fixing, QAPI retries up to 3 times and stops if the error does not progress.',
-  )
-  cBehavior.appendChild(verificationHint)
+
+  if (currentSettings.verification !== 'off') {
+    const commandInput = inputEl('text', verificationDraft ?? currentSettings.verificationCommand, (value) => { verificationDraft = value })
+    commandInput.id = 'verification-command'
+    commandInput.placeholder = 'behave {tests}'
+    commandInput.spellcheck = false
+    cBehavior.appendChild(field('Comando de verificación', commandInput))
+
+    const commandActions = div('row')
+    commandActions.appendChild(button('Guardar comando', 'btn btn-primary btn-sm', () => {
+      const command = (verificationDraft ?? currentSettings.verificationCommand).trim()
+      verificationDraft = null
+      if (settings) settings = { ...settings, verificationCommand: command }
+      post({ type: 'saveSettings', settings: { verificationCommand: command } })
+      toast('Comando de verificación guardado')
+      render()
+    }))
+    commandActions.appendChild(button('Sugerir para este proyecto', 'btn btn-ghost btn-sm', () => post({ type: 'suggestVerificationCommand' })))
+    cBehavior.appendChild(commandActions)
+
+    if (!currentSettings.verificationCommand) {
+      const missing = div('status-warn')
+      missing.textContent = tr(
+        'Sin comando no se verifica nada. Defínelo para activar la verificación.',
+        'Without a command nothing is verified. Define one to enable verification.',
+      )
+      cBehavior.appendChild(missing)
+    }
+    const verificationHint = div('muted')
+    verificationHint.textContent = tr(
+      '{tests} = sólo los archivos de prueba que cambiaron (si no hay, no se ejecuta). {files} = todos los archivos cambiados. {tests,} los une con comas. Sin marcadores se ejecuta el comando tal cual: evita suites completas en proyectos grandes.',
+      '{tests} = only the changed test files (if none, nothing runs). {files} = all changed files. {tests,} joins them with commas. Without placeholders the command runs as is: avoid full suites in large projects.',
+    )
+    cBehavior.appendChild(verificationHint)
+    if (currentSettings.verification === 'autofix') {
+      const autofixHint = div('muted')
+      autofixHint.textContent = tr(
+        'Con corrección automática, QAPI reintenta hasta 3 veces y sólo edita los archivos citados en el error.',
+        'With automatic fixing, QAPI retries up to 3 times and only edits files cited in the error.',
+      )
+      cBehavior.appendChild(autofixHint)
+    }
+  }
   view.appendChild(cBehavior)
 
   const cMemory = card('Memoria del proyecto', 'Contexto persistente que QAPI tendrá en futuras conversaciones.')
@@ -1662,54 +1988,812 @@ function settingsView(): HTMLElement {
   cUi.appendChild(fontWrap)
   view.appendChild(cUi)
 
-  const cMcp = card('Servidores MCP', 'Define servidores en JSON. Habilitarlos autoriza al agente a iniciar el proceso y usar sus tools durante el chat.')
-  const mcpWarning = div('status-warn')
-  mcpWarning.textContent = 'Activa sólo servidores confiables: pueden ejecutar acciones y acceder a datos con tus permisos.'
-  cMcp.appendChild(mcpWarning)
-  const mcpEditor = document.createElement('textarea')
-  mcpEditor.className = 'json-editor'
-  mcpEditor.spellcheck = false
-  mcpEditor.value = mcpDraft ?? currentSettings.mcpJson
-  mcpEditor.oninput = () => { mcpDraft = mcpEditor.value; saveLocalState() }
-  cMcp.appendChild(field('Configuración (JSON)', mcpEditor))
-  const actions = div('row')
-  actions.appendChild(button('Validar', 'btn btn-ghost btn-sm', () => post({ type: 'validateMcp', json: mcpDraft ?? currentSettings.mcpJson })))
-  actions.appendChild(button('Guardar', 'btn btn-primary btn-sm', () => {
-    post({ type: 'saveMcpJson', json: mcpDraft ?? currentSettings.mcpJson })
-    toast('Configuración MCP guardada')
+  const mcpHint = div('hint')
+  mcpHint.textContent = tr('Los servidores MCP se configuran en la pestaña MCP.', 'MCP servers are configured in the MCP tab.')
+  view.appendChild(mcpHint)
+  return view
+}
+
+// ── Skills ──────────────────────────────────────────────────────────────────
+
+let skillsState: { skills: SkillDefinition[]; templates: SkillDefinition[]; detected: string[]; trusted: boolean } | null = null
+let skillForm: (SkillDefinition & { previousSlug?: string }) | null = null
+
+const SKILL_ACTIVATIONS: { value: SkillActivation; label: string; labelEn: string; help: string; helpEn: string }[] = [
+  {
+    value: 'auto', label: 'Automática', labelEn: 'Automatic',
+    help: 'El agente lee la descripción y la usa cuando la tarea lo requiere.',
+    helpEn: 'The agent reads the description and uses it when the task needs it.',
+  },
+  {
+    value: 'event', label: 'Ante un evento', labelEn: 'On an event',
+    help: 'Se aplica cuando ocurre algo: un resultado de prueba o preparar un archivo.',
+    helpEn: 'Applies when something happens: a test result or preparing a file.',
+  },
+  {
+    value: 'fileMatch', label: 'Por tipo de archivo', labelEn: 'By file type',
+    help: 'Se aplica cuando trabajas con archivos que coinciden con un patrón.',
+    helpEn: 'Applies when you work with files matching a pattern.',
+  },
+  {
+    value: 'always', label: 'Siempre', labelEn: 'Always',
+    help: 'Se incluye en todos los mensajes. Úsala con moderación.',
+    helpEn: 'Included in every message. Use it sparingly.',
+  },
+  {
+    value: 'manual', label: 'Manual', labelEn: 'Manual',
+    help: 'Sólo cuando la nombras en el chat con #skill:nombre.',
+    helpEn: 'Only when you mention it in the chat with #skill:name.',
+  },
+]
+
+const SKILL_EVENTS: { value: SkillEvent; label: string; labelEn: string; help: string; helpEn: string }[] = [
+  {
+    value: 'testResult', label: 'Resultado de prueba', labelEn: 'Test result',
+    help: 'Al fallar un comando que ejecutaste (abre un análisis automático), al diagnosticar un artefacto o cuando el agente lee un reporte.',
+    helpEn: 'When a command you ran fails (starts an automatic analysis), when diagnosing an artifact, or when the agent reads a report.',
+  },
+  {
+    value: 'beforeWrite', label: 'Al preparar archivos', labelEn: 'When preparing files',
+    help: 'Cuando el agente prepara un archivo; con patrón, sólo si coincide.',
+    helpEn: 'When the agent prepares a file; with a pattern, only if it matches.',
+  },
+]
+
+const GLOB_EXAMPLES = ['**/*.feature', '**/steps/**/*.py', '**/pages/**', '**/*.spec.ts', '**/json_poms/**']
+
+function activationLabel(skill: SkillDefinition): string {
+  const activation = SKILL_ACTIVATIONS.find((item) => item.value === skill.activation)
+  const base = activation ? tr(activation.label, activation.labelEn) : skill.activation
+  if (skill.activation === 'event') {
+    const events = (skill.events || []).map((event) => {
+      const def = SKILL_EVENTS.find((item) => item.value === event)
+      return def ? tr(def.label, def.labelEn) : event
+    })
+    return `${base}: ${events.join(', ')}`
+  }
+  if (skill.activation === 'fileMatch' && skill.fileMatchPattern) return `${base}: ${skill.fileMatchPattern}`
+  return base
+}
+
+function skillsView(): HTMLElement {
+  const view = div('view settings-view skills-view')
+  if (!skillsState) {
+    post({ type: 'refreshSkills' })
+    const loading = div('muted')
+    loading.textContent = tr('Cargando skills…', 'Loading skills…')
+    view.appendChild(loading)
+    return view
+  }
+  if (skillForm) {
+    view.appendChild(skillFormView(skillForm))
+    return view
+  }
+
+  const intro = div('mcp-intro')
+  const title = document.createElement('h3')
+  title.textContent = 'Skills'
+  const description = div('hint')
+  description.textContent = tr(
+    'Instrucciones reutilizables que el agente aplica cuando corresponde: analizar fallos, cómo escribir localizadores, convenciones del equipo. Se guardan en .qapi/skills para compartirlas con tu equipo.',
+    'Reusable instructions the agent applies when relevant: analyzing failures, how to write locators, team conventions. Saved in .qapi/skills so your team can share them.',
+  )
+  intro.append(title, description)
+  view.appendChild(intro)
+
+  if (!skillsState.trusted) {
+    const warning = div('status-warn')
+    warning.textContent = tr(
+      'Este workspace no es confiable: las skills no se cargan hasta que confíes en él.',
+      'This workspace is not trusted: skills are not loaded until you trust it.',
+    )
+    view.appendChild(warning)
+    return view
+  }
+
+  const toolbar = div('row mcp-toolbar')
+  toolbar.appendChild(button(tr('+ Crear skill', '+ Create skill'), 'btn btn-primary btn-sm', () => {
+    skillForm = { slug: '', name: '', description: '', activation: 'auto', instructions: '', enabled: true, events: [], frameworks: [] }
+    render()
   }))
-  cMcp.appendChild(actions)
-  if (mcpValidation) {
-    if (mcpValidation.error) {
-      const error = div('status-err')
-      error.textContent = `✕ ${mcpValidation.error}`
-      cMcp.appendChild(error)
-    } else {
-      const okCount = mcpValidation.issues.filter((issue) => issue.ok).length
-      const summary = div(mcpValidation.ok ? 'status-ok' : 'status-err')
-      summary.textContent = mcpValidation.ok ? `✓ ${okCount} servidor(es) válido(s)` : `⚠ ${mcpValidation.issues.length - okCount} con problemas`
-      cMcp.appendChild(summary)
-      for (const issue of mcpValidation.issues) {
-        const item = div('mcp-item')
-        const info = div('')
-        const name = div(`name ${issue.ok ? 'status-ok' : 'status-err'}`)
-        name.textContent = `${issue.ok ? '✓' : '✕'} ${issue.name}`
-        const command = div('cmd')
-        command.textContent = issue.message
-        info.appendChild(name)
-        info.appendChild(command)
-        item.appendChild(info)
-        if (issue.ok) {
-          const toggle = checkbox(Boolean(currentSettings.mcpEnabled[issue.name]), () => post({ type: 'toggleMcp', name: issue.name, enabled: toggle.checked }))
-          toggle.className = 'switch'
-          item.appendChild(toggle)
-        }
-        cMcp.appendChild(item)
-      }
+  view.appendChild(toolbar)
+
+  const list = div('mcp-list')
+  if (!skillsState.skills.length) {
+    const empty = div('muted')
+    empty.textContent = tr('Aún no hay skills. Crea una o parte de una plantilla.', 'No skills yet. Create one or start from a template.')
+    list.appendChild(empty)
+  }
+  for (const skill of skillsState.skills) list.appendChild(skillCard(skill))
+  view.appendChild(list)
+
+  const existing = new Set(skillsState.skills.map((skill) => skill.slug))
+  const templates = skillsState.templates.filter((template) => !existing.has(template.slug))
+  if (templates.length) {
+    const label = div('section-label')
+    label.textContent = tr('Plantillas', 'Templates')
+    view.appendChild(label)
+    const grid = div('mcp-presets')
+    for (const template of templates) {
+      const item = div('mcp-preset')
+      const head = div('mcp-preset-head')
+      const name = document.createElement('strong')
+      name.textContent = template.name
+      head.appendChild(name)
+      head.appendChild(button(tr('Usar', 'Use'), 'btn btn-ghost btn-sm', () => {
+        skillForm = { ...template, events: [...(template.events || [])], frameworks: [...(template.frameworks || [])] }
+        render()
+      }))
+      const text = div('hint')
+      text.textContent = template.description
+      const mode = div('skill-badge')
+      mode.textContent = activationLabel(template)
+      item.append(head, text, mode)
+      grid.appendChild(item)
+    }
+    view.appendChild(grid)
+  }
+  return view
+}
+
+function skillCard(skill: SkillDefinition): HTMLElement {
+  const card = div(`mcp-card ${skill.enabled ? '' : 'skill-disabled'}`)
+  const header = div('mcp-card-header')
+  const title = div('mcp-card-title')
+  title.textContent = skill.name
+  header.appendChild(title)
+  const toggleLabel = document.createElement('label')
+  toggleLabel.className = 'toggle'
+  const toggle = document.createElement('input')
+  toggle.type = 'checkbox'
+  toggle.checked = skill.enabled
+  toggle.setAttribute('role', 'switch')
+  toggle.setAttribute('aria-label', tr(`Activar ${skill.name}`, `Enable ${skill.name}`))
+  toggle.onchange = () => post({ type: 'toggleSkill', slug: skill.slug, enabled: toggle.checked })
+  const toggleText = document.createElement('span')
+  toggleText.textContent = skill.enabled ? tr('Activa', 'Enabled') : tr('Inactiva', 'Disabled')
+  toggleLabel.append(toggleText, toggle)
+  header.appendChild(toggleLabel)
+  card.appendChild(header)
+
+  if (skill.description) {
+    const description = div('hint')
+    description.textContent = skill.description
+    card.appendChild(description)
+  }
+  const badges = div('skill-badges')
+  const mode = div('skill-badge')
+  mode.textContent = activationLabel(skill)
+  badges.appendChild(mode)
+  if (skill.activation === 'event' && skill.events?.includes('beforeWrite') && skill.fileMatchPattern) {
+    const pattern = div('skill-badge')
+    pattern.textContent = skill.fileMatchPattern
+    badges.appendChild(pattern)
+  }
+  if (skill.frameworks?.length) {
+    const scope = div('skill-badge')
+    scope.textContent = tr(`Sólo en: ${skill.frameworks.join(', ')}`, `Only in: ${skill.frameworks.join(', ')}`)
+    badges.appendChild(scope)
+  }
+  if (skill.activation === 'manual') {
+    const usage = document.createElement('code')
+    usage.className = 'skill-badge'
+    usage.textContent = `#skill:${skill.slug}`
+    badges.appendChild(usage)
+  }
+  card.appendChild(badges)
+
+  const actions = div('row mcp-card-actions')
+  actions.appendChild(button(tr('Editar', 'Edit'), 'btn btn-ghost btn-sm', () => {
+    skillForm = { ...skill, events: [...(skill.events || [])], frameworks: [...(skill.frameworks || [])], previousSlug: skill.slug }
+    render()
+  }))
+  actions.appendChild(button(tr('Abrir .md', 'Open .md'), 'btn btn-ghost btn-sm', () => post({ type: 'openSkillFile', slug: skill.slug })))
+  actions.appendChild(button(tr('Eliminar', 'Delete'), 'btn btn-ghost btn-sm mcp-delete', () => {
+    if (!confirmOnce(`skill-delete:${skill.slug}`)) {
+      toast(tr(`Pulsa Eliminar otra vez para borrar “${skill.name}”.`, `Click Delete again to remove “${skill.name}”.`))
+      return
+    }
+    post({ type: 'deleteSkill', slug: skill.slug })
+    toast(tr('Skill eliminada', 'Skill removed'))
+  }))
+  card.appendChild(actions)
+  return card
+}
+
+function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLElement {
+  const box = div('card mcp-form skill-form')
+  const title = document.createElement('h3')
+  title.textContent = form.previousSlug ? tr(`Editar ${form.name}`, `Edit ${form.name}`) : tr('Nueva skill', 'New skill')
+  box.appendChild(title)
+
+  const nameInput = inputEl('text', form.name, (value) => { form.name = value })
+  nameInput.id = 'skill-form-name'
+  nameInput.placeholder = tr('Análisis de fallos', 'Failure analysis')
+  box.appendChild(field(tr('Nombre', 'Name'), nameInput))
+
+  const descriptionInput = inputEl('text', form.description, (value) => { form.description = value })
+  descriptionInput.id = 'skill-form-description'
+  descriptionInput.placeholder = tr('Cuándo debe usarse y para qué', 'When it should be used and what for')
+  box.appendChild(field(tr('Descripción', 'Description'), descriptionInput))
+  if (form.activation === 'auto') {
+    const hint = div('hint')
+    hint.textContent = tr(
+      'En modo automático el agente decide por esta descripción: explica claramente cuándo aplica.',
+      'In automatic mode the agent decides from this description: explain clearly when it applies.',
+    )
+    box.appendChild(hint)
+  }
+
+  // Activación como opciones visuales en vez de un select.
+  const activationLabelEl = div('section-label')
+  activationLabelEl.textContent = tr('¿Cuándo se usa?', 'When is it used?')
+  box.appendChild(activationLabelEl)
+  const options = div('skill-options')
+  options.setAttribute('role', 'radiogroup')
+  for (const option of SKILL_ACTIVATIONS) {
+    const item = document.createElement('button')
+    item.type = 'button'
+    item.className = `skill-option ${form.activation === option.value ? 'selected' : ''}`
+    item.setAttribute('role', 'radio')
+    item.setAttribute('aria-checked', String(form.activation === option.value))
+    const label = document.createElement('strong')
+    label.textContent = tr(option.label, option.labelEn)
+    const help = div('hint')
+    help.textContent = tr(option.help, option.helpEn)
+    item.append(label, help)
+    item.onclick = () => {
+      form.activation = option.value
+      if (option.value === 'event' && !form.events?.length) form.events = ['testResult']
+      render()
+    }
+    options.appendChild(item)
+  }
+  box.appendChild(options)
+
+  if (form.activation === 'event') {
+    const eventsLabel = div('section-label')
+    eventsLabel.textContent = tr('Eventos', 'Events')
+    box.appendChild(eventsLabel)
+    for (const event of SKILL_EVENTS) {
+      const row = document.createElement('label')
+      row.className = 'check-label skill-event'
+      const input = checkbox(Boolean(form.events?.includes(event.value)), () => {
+        const next = new Set(form.events || [])
+        if (input.checked) next.add(event.value)
+        else next.delete(event.value)
+        form.events = [...next]
+        render()
+      })
+      const text = div('')
+      const strong = document.createElement('strong')
+      strong.textContent = tr(event.label, event.labelEn)
+      const help = div('hint')
+      help.textContent = tr(event.help, event.helpEn)
+      text.append(strong, help)
+      row.append(input, text)
+      box.appendChild(row)
     }
   }
-  view.appendChild(cMcp)
+
+  if (form.activation === 'fileMatch' || (form.activation === 'event' && form.events?.includes('beforeWrite'))) {
+    const patternInput = inputEl('text', form.fileMatchPattern || '', (value) => { form.fileMatchPattern = value })
+    patternInput.id = 'skill-form-pattern'
+    patternInput.placeholder = '**/pages/**'
+    patternInput.spellcheck = false
+    const optional = form.activation === 'event' ? tr(' (opcional: vacío = todos los archivos)', ' (optional: empty = all files)') : ''
+    box.appendChild(field(`${tr('Patrón de archivos', 'File pattern')}${optional}`, patternInput))
+    const chips = div('skill-chips')
+    for (const example of GLOB_EXAMPLES) {
+      chips.appendChild(button(example, 'skill-chip', () => { form.fileMatchPattern = example; render() }))
+    }
+    box.appendChild(chips)
+  }
+
+  const scopeLabel = div('section-label')
+  scopeLabel.textContent = tr('Sólo en proyectos con… (opcional)', 'Only in projects with… (optional)')
+  box.appendChild(scopeLabel)
+  const scopeHint = div('hint')
+  scopeHint.textContent = tr(
+    'Sin selección, aplica en cualquier proyecto. Resaltados: los detectados en este proyecto.',
+    'With nothing selected it applies to any project. Highlighted: detected in this project.',
+  )
+  box.appendChild(scopeHint)
+  const detected = new Set(skillsState?.detected || [])
+  const known = [...new Set([...KNOWN_FRAMEWORKS, ...detected, ...(form.frameworks || [])])]
+  const scopeChips = div('skill-chips')
+  for (const framework of known) {
+    const selected = Boolean(form.frameworks?.includes(framework))
+    const chip = button(framework, `skill-chip ${selected ? 'selected' : ''} ${detected.has(framework) ? 'detected' : ''}`, () => {
+      const next = new Set(form.frameworks || [])
+      if (selected) next.delete(framework)
+      else next.add(framework)
+      form.frameworks = [...next]
+      render()
+    })
+    chip.setAttribute('aria-pressed', String(selected))
+    scopeChips.appendChild(chip)
+  }
+  box.appendChild(scopeChips)
+
+  const instructions = document.createElement('textarea')
+  instructions.id = 'skill-form-instructions'
+  instructions.className = 'skill-instructions'
+  instructions.value = form.instructions
+  instructions.placeholder = tr(
+    'Escribe las instrucciones como se las darías a un compañero. Ej.: "Al crear localizadores usa XPath relativos y prioriza @data-testid".',
+    'Write the instructions as you would to a teammate. E.g.: "When creating locators use relative XPath and prefer @data-testid".',
+  )
+  instructions.oninput = () => { form.instructions = instructions.value }
+  box.appendChild(field(tr('Instrucciones', 'Instructions'), instructions))
+
+  const enabledRow = document.createElement('label')
+  enabledRow.className = 'toggle'
+  const enabledInput = document.createElement('input')
+  enabledInput.type = 'checkbox'
+  enabledInput.checked = form.enabled
+  enabledInput.setAttribute('role', 'switch')
+  enabledInput.onchange = () => { form.enabled = enabledInput.checked }
+  const enabledText = document.createElement('span')
+  enabledText.textContent = tr('Activa', 'Enabled')
+  enabledRow.append(enabledText, enabledInput)
+  box.appendChild(enabledRow)
+
+  const actions = div('row skill-form-actions')
+  actions.appendChild(button(tr('Guardar skill', 'Save skill'), 'btn btn-primary btn-sm', () => {
+    if (!form.name.trim() || !form.instructions.trim()) {
+      toast(tr('El nombre y las instrucciones son obligatorios.', 'Name and instructions are required.'))
+      return
+    }
+    if (form.activation === 'fileMatch' && !form.fileMatchPattern?.trim()) {
+      toast(tr('Indica el patrón de archivos.', 'Enter the file pattern.'))
+      return
+    }
+    if (form.activation === 'event' && !form.events?.length) {
+      toast(tr('Elige al menos un evento.', 'Choose at least one event.'))
+      return
+    }
+    const { previousSlug, ...skill } = form
+    post({ type: 'saveSkill', skill, previousSlug })
+    skillForm = null
+    toast(tr('Skill guardada', 'Skill saved'))
+    render()
+  }))
+  actions.appendChild(button(tr('Cancelar', 'Cancel'), 'btn btn-ghost btn-sm', () => { skillForm = null; render() }))
+  box.appendChild(actions)
+  return box
+}
+
+const KNOWN_FRAMEWORKS = ['Behave', 'pytest', 'Playwright', 'Cypress', 'Selenium', 'Jest', 'Cucumber', 'Robot Framework', 'Python', 'TypeScript', 'Java']
+
+// ── MCP ─────────────────────────────────────────────────────────────────────
+
+interface McpServerEntry {
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  [key: string]: unknown
+}
+
+interface McpFormState {
+  /** Nombre original al editar; ausente al crear uno nuevo. */
+  originalName?: string
+  name: string
+  command: string
+  args: string
+  env: string
+}
+
+const MCP_PRESETS: { label: string; description: string; name: string; command: string; args: string[] }[] = [
+  {
+    label: 'Filesystem', name: 'filesystem', command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-filesystem', '.'],
+    description: 'Lee y escribe archivos dentro de la carpeta indicada.',
+  },
+  {
+    label: 'Playwright', name: 'playwright', command: 'npx', args: ['-y', '@playwright/mcp'],
+    description: 'Controla un navegador real: navegar, hacer clic, capturar el DOM.',
+  },
+  {
+    label: 'Git', name: 'git', command: 'uvx', args: ['mcp-server-git', '--repository', '.'],
+    description: 'Consulta historial, diffs y ramas del repositorio.',
+  },
+  {
+    label: 'Fetch', name: 'fetch', command: 'uvx', args: ['mcp-server-fetch'],
+    description: 'Descarga páginas web y las convierte a texto.',
+  },
+]
+
+let mcpForm: McpFormState | null = null
+let mcpShowJson = false
+const mcpProbes: Record<string, { running: boolean; result?: Extract<ToWebview, { type: 'mcpProbe' }> }> = {}
+
+/** Configuración MCP vigente en la UI: el borrador si existe, si no la guardada. */
+function mcpSource(): string {
+  return mcpDraft ?? settings?.mcpJson ?? ''
+}
+
+function readMcpConfig(): { root: Record<string, unknown>; servers: Record<string, McpServerEntry>; error?: string } {
+  const text = mcpSource().trim()
+  if (!text) return { root: {}, servers: {} }
+  try {
+    const data = JSON.parse(text)
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error(tr('se esperaba un objeto', 'an object was expected'))
+    const servers = data.mcpServers && typeof data.mcpServers === 'object' ? data.mcpServers : data
+    return { root: data.mcpServers ? data : {}, servers }
+  } catch (error) {
+    return { root: {}, servers: {}, error: String((error as Error).message || error) }
+  }
+}
+
+/** Escribe el mapa de servidores, conserva otras claves de la raíz y guarda. */
+function saveMcpServers(servers: Record<string, McpServerEntry>, root: Record<string, unknown>) {
+  const json = JSON.stringify({ ...root, mcpServers: servers }, null, 2)
+  mcpDraft = json
+  saveLocalState()
+  post({ type: 'saveMcpJson', json })
+}
+
+function mcpView(): HTMLElement {
+  const view = div('view settings-view mcp-view')
+  const currentSettings = settings!
+  const config = readMcpConfig()
+
+  const intro = div('mcp-intro')
+  const title = document.createElement('h3')
+  title.textContent = tr('Servidores MCP', 'MCP servers')
+  const description = div('hint')
+  description.textContent = tr(
+    'Conecta herramientas externas al agente. Un servidor activo se inicia al usarlo en el chat y sus tools piden tu aprobación en cada llamada.',
+    'Connect external tools to the agent. An enabled server starts when the chat uses it, and each tool call asks for your approval.',
+  )
+  const warning = div('status-warn')
+  warning.textContent = tr(
+    'Activa sólo servidores confiables: se ejecutan con tus permisos y pueden acceder a datos.',
+    'Enable only trusted servers: they run with your permissions and can access data.',
+  )
+  intro.append(title, description, warning)
+  view.appendChild(intro)
+
+  if (config.error && !mcpShowJson) {
+    const error = div('status-err')
+    error.textContent = tr(`La configuración tiene JSON inválido: ${config.error}`, `The configuration has invalid JSON: ${config.error}`)
+    view.appendChild(error)
+    view.appendChild(button(tr('Corregir en JSON', 'Fix in JSON'), 'btn btn-ghost btn-sm', () => { mcpShowJson = true; render() }))
+    return view
+  }
+
+  if (mcpForm) {
+    view.appendChild(mcpFormView(mcpForm, config))
+    return view
+  }
+
+  const toolbar = div('row mcp-toolbar')
+  toolbar.appendChild(button(tr('+ Añadir servidor', '+ Add server'), 'btn btn-primary btn-sm', () => {
+    mcpForm = { name: '', command: '', args: '', env: '' }
+    render()
+  }))
+  toolbar.appendChild(button(tr('Revalidar', 'Revalidate'), 'btn btn-ghost btn-sm', () => post({ type: 'validateMcp', json: mcpSource() })))
+  toolbar.appendChild(div('spacer'))
+  toolbar.appendChild(linkBtn(mcpShowJson ? tr('Ocultar JSON', 'Hide JSON') : tr('Editar JSON', 'Edit JSON'), () => {
+    mcpShowJson = !mcpShowJson
+    render()
+  }))
+  view.appendChild(toolbar)
+
+  if (mcpShowJson) view.appendChild(mcpJsonEditor(currentSettings))
+
+  const names = Object.keys(config.servers).sort((a, b) => a.localeCompare(b))
+  const list = div('mcp-list')
+  if (!names.length) {
+    const empty = div('muted')
+    empty.textContent = tr('No hay servidores configurados. Añade uno o parte de una plantilla.', 'No servers configured. Add one or start from a template.')
+    list.appendChild(empty)
+  }
+  for (const name of names) list.appendChild(mcpServerCard(name, normalizeMcpEntry(config.servers[name]), config, currentSettings))
+  view.appendChild(list)
+
+  const presets = MCP_PRESETS.filter((preset) => !config.servers[preset.name])
+  if (presets.length) {
+    const label = div('section-label')
+    label.textContent = tr('Plantillas', 'Templates')
+    view.appendChild(label)
+    const grid = div('mcp-presets')
+    for (const preset of presets) {
+      const item = div('mcp-preset')
+      const head = div('mcp-preset-head')
+      const name = document.createElement('strong')
+      name.textContent = preset.label
+      head.appendChild(name)
+      head.appendChild(button(tr('Añadir', 'Add'), 'btn btn-ghost btn-sm', () => {
+        mcpForm = { name: preset.name, command: preset.command, args: preset.args.join('\n'), env: '' }
+        render()
+      }))
+      const text = div('hint')
+      text.textContent = tr(preset.description, mcpPresetDescriptionEn(preset.name))
+      const command = document.createElement('code')
+      command.textContent = `${preset.command} ${preset.args.join(' ')}`
+      item.append(head, text, command)
+      grid.appendChild(item)
+    }
+    view.appendChild(grid)
+    const note = div('hint')
+    note.textContent = tr(
+      'Las plantillas descargan la última versión del paquete con npx/uvx. Para fijar una versión, edita los argumentos (p. ej. paquete@1.2.3).',
+      'Templates download the latest package version with npx/uvx. To pin a version, edit the arguments (e.g. package@1.2.3).',
+    )
+    view.appendChild(note)
+  }
   return view
+}
+
+/** El JSON lo puede editar el usuario a mano: los campos mal tipados no deben romper la vista. */
+function normalizeMcpEntry(value: unknown): McpServerEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const entry = value as McpServerEntry
+  const env = entry.env && typeof entry.env === 'object' && !Array.isArray(entry.env) ? entry.env : undefined
+  return {
+    ...entry,
+    command: typeof entry.command === 'string' ? entry.command : '',
+    args: Array.isArray(entry.args) ? entry.args.map(String) : [],
+    env: env ? Object.fromEntries(Object.entries(env).map(([key, item]) => [key, String(item)])) : undefined,
+  }
+}
+
+function mcpPresetDescriptionEn(name: string): string {
+  return ({
+    filesystem: 'Reads and writes files inside the given folder.',
+    playwright: 'Drives a real browser: navigate, click, capture the DOM.',
+    git: 'Queries repository history, diffs and branches.',
+    fetch: 'Downloads web pages and converts them to text.',
+  } as Record<string, string>)[name] || ''
+}
+
+function mcpServerCard(
+  name: string,
+  server: McpServerEntry,
+  config: ReturnType<typeof readMcpConfig>,
+  currentSettings: Settings,
+): HTMLElement {
+  const card = div('mcp-card')
+  const issue = mcpValidation?.issues.find((item) => item.name === name)
+  const enabled = Boolean(currentSettings.mcpEnabled[name])
+  const saved = mcpDraft === null || mcpDraft === currentSettings.mcpJson
+
+  const header = div('mcp-card-header')
+  const status = div(`mcp-dot ${issue ? (issue.ok ? 'ok' : 'err') : 'unknown'}`)
+  status.title = issue ? (issue.ok ? tr('Ejecutable encontrado', 'Executable found') : issue.message) : tr('Sin validar', 'Not validated')
+  const title = div('mcp-card-title')
+  title.textContent = name
+  header.append(status, title)
+
+  const toggleLabel = document.createElement('label')
+  toggleLabel.className = 'check-label mcp-toggle'
+  const toggle = checkbox(enabled, () => post({ type: 'toggleMcp', name, enabled: toggle.checked }))
+  toggle.className = 'switch'
+  // Sólo se activa un servidor guardado cuyo ejecutable existe.
+  toggle.disabled = !saved || !issue?.ok
+  const toggleText = document.createElement('span')
+  toggleText.textContent = enabled ? tr('Activo', 'Enabled') : tr('Inactivo', 'Disabled')
+  toggleLabel.append(toggle, toggleText)
+  header.appendChild(toggleLabel)
+  card.appendChild(header)
+
+  const command = document.createElement('code')
+  command.className = 'mcp-command'
+  command.textContent = `${server.command || ''} ${(server.args || []).join(' ')}`.trim()
+  card.appendChild(command)
+  const envKeys = Object.keys(server.env || {})
+  if (envKeys.length) {
+    const env = div('hint')
+    env.textContent = `env: ${envKeys.join(', ')}`
+    card.appendChild(env)
+  }
+  if (issue && !issue.ok) {
+    const problem = div('status-err')
+    problem.textContent = issue.message
+    card.appendChild(problem)
+  }
+
+  const probe = mcpProbes[name]
+  if (probe?.running) {
+    const running = div('muted')
+    running.textContent = tr('Conectando…', 'Connecting…')
+    card.appendChild(running)
+  } else if (probe?.result) {
+    const result = probe.result
+    const summary = div(result.ok ? 'status-ok' : 'status-err')
+    summary.textContent = result.ok
+      ? tr(`✓ Conectado en ${result.durationMs} ms · ${result.tools.length} tool(s)`, `✓ Connected in ${result.durationMs} ms · ${result.tools.length} tool(s)`)
+      : `✕ ${result.message || tr('No se pudo conectar.', 'Could not connect.')}`
+    card.appendChild(summary)
+    if (result.tools.length) {
+      const tools = trackOpen(document.createElement('details'), `mcp-tools:${name}`)
+      tools.className = 'mcp-tools'
+      const toolsSummary = document.createElement('summary')
+      toolsSummary.textContent = tr('Ver herramientas', 'Show tools')
+      tools.appendChild(toolsSummary)
+      for (const tool of result.tools) {
+        const row = div('mcp-tool')
+        const toolName = document.createElement('code')
+        toolName.textContent = tool.name
+        row.appendChild(toolName)
+        if (tool.description) {
+          const toolDescription = div('hint')
+          toolDescription.textContent = tool.description
+          row.appendChild(toolDescription)
+        }
+        tools.appendChild(row)
+      }
+      card.appendChild(tools)
+    }
+  }
+
+  const actions = div('row mcp-card-actions')
+  const test = button(tr('Probar conexión', 'Test connection'), 'btn btn-ghost btn-sm', () => {
+    mcpProbes[name] = { running: true }
+    post({ type: 'probeMcp', name })
+    render()
+  })
+  test.disabled = !saved || Boolean(probe?.running)
+  if (!saved) test.title = tr('Guarda los cambios antes de probar.', 'Save your changes before testing.')
+  actions.appendChild(test)
+  actions.appendChild(button(tr('Editar', 'Edit'), 'btn btn-ghost btn-sm', () => {
+    mcpForm = {
+      originalName: name,
+      name,
+      command: server.command || '',
+      args: (server.args || []).join('\n'),
+      env: Object.entries(server.env || {}).map(([key, value]) => `${key}=${value}`).join('\n'),
+    }
+    render()
+  }))
+  actions.appendChild(button(tr('Eliminar', 'Delete'), 'btn btn-ghost btn-sm mcp-delete', () => {
+    if (!confirmOnce(`mcp-delete:${name}`)) {
+      toast(tr(`Pulsa Eliminar otra vez para borrar “${name}”.`, `Click Delete again to remove “${name}”.`))
+      return
+    }
+    const next = { ...config.servers }
+    delete next[name]
+    delete mcpProbes[name]
+    saveMcpServers(next, config.root)
+    toast(tr('Servidor eliminado', 'Server removed'))
+  }))
+  card.appendChild(actions)
+  return card
+}
+
+/** Confirmación de dos clics en 4 s (los diálogos nativos no funcionan en webviews). */
+const pendingConfirmations = new Map<string, number>()
+function confirmOnce(key: string): boolean {
+  const now = Date.now()
+  const previous = pendingConfirmations.get(key)
+  if (previous && now - previous < 4000) {
+    pendingConfirmations.delete(key)
+    return true
+  }
+  pendingConfirmations.set(key, now)
+  return false
+}
+
+function mcpFormView(form: McpFormState, config: ReturnType<typeof readMcpConfig>): HTMLElement {
+  const box = div('card mcp-form')
+  const title = document.createElement('h3')
+  title.textContent = form.originalName ? tr(`Editar ${form.originalName}`, `Edit ${form.originalName}`) : tr('Nuevo servidor MCP', 'New MCP server')
+  box.appendChild(title)
+
+  const nameInput = inputEl('text', form.name, (value) => { form.name = value })
+  nameInput.id = 'mcp-form-name'
+  nameInput.placeholder = 'playwright'
+  box.appendChild(field(tr('Nombre', 'Name'), nameInput))
+
+  const commandInput = inputEl('text', form.command, (value) => { form.command = value })
+  commandInput.id = 'mcp-form-command'
+  commandInput.placeholder = 'npx'
+  box.appendChild(field(tr('Comando', 'Command'), commandInput))
+
+  const argsInput = document.createElement('textarea')
+  argsInput.id = 'mcp-form-args'
+  argsInput.className = 'json-editor mcp-small-editor'
+  argsInput.spellcheck = false
+  argsInput.value = form.args
+  argsInput.placeholder = '-y\n@playwright/mcp'
+  argsInput.oninput = () => { form.args = argsInput.value }
+  box.appendChild(field(tr('Argumentos (uno por línea)', 'Arguments (one per line)'), argsInput))
+
+  const envInput = document.createElement('textarea')
+  envInput.id = 'mcp-form-env'
+  envInput.className = 'json-editor mcp-small-editor'
+  envInput.spellcheck = false
+  envInput.value = form.env
+  envInput.placeholder = 'API_KEY=…'
+  envInput.oninput = () => { form.env = envInput.value }
+  box.appendChild(field(tr('Variables de entorno (CLAVE=valor, una por línea)', 'Environment variables (KEY=value, one per line)'), envInput))
+  const envNote = div('hint')
+  envNote.textContent = tr(
+    'Estas variables se guardan en la configuración de VS Code sin cifrar. Para secretos, prefiere variables ya definidas en tu sistema.',
+    'These variables are stored unencrypted in the VS Code settings. For secrets, prefer variables already defined in your system.',
+  )
+  box.appendChild(envNote)
+
+  const actions = div('row')
+  actions.appendChild(button(tr('Guardar servidor', 'Save server'), 'btn btn-primary btn-sm', () => {
+    const name = form.name.trim()
+    const command = form.command.trim()
+    if (!name || !command) {
+      toast(tr('El nombre y el comando son obligatorios.', 'Name and command are required.'))
+      return
+    }
+    if (name !== form.originalName && config.servers[name]) {
+      toast(tr(`Ya existe un servidor llamado “${name}”.`, `A server named “${name}” already exists.`))
+      return
+    }
+    const env: Record<string, string> = {}
+    for (const line of form.env.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      const separator = trimmed.indexOf('=')
+      if (separator <= 0) {
+        toast(tr(`Variable inválida: “${trimmed}”. Usa CLAVE=valor.`, `Invalid variable: “${trimmed}”. Use KEY=value.`))
+        return
+      }
+      env[trimmed.slice(0, separator).trim()] = trimmed.slice(separator + 1)
+    }
+    const args = form.args.split(/\r?\n/).map((arg) => arg.trim()).filter(Boolean)
+    // Se conservan claves extra del servidor original (p. ej. "type" o "disabled").
+    const previous = form.originalName ? normalizeMcpEntry(config.servers[form.originalName]) : {}
+    const entry: McpServerEntry = { ...previous, command, args }
+    if (Object.keys(env).length) entry.env = env
+    else delete entry.env
+
+    const next: Record<string, McpServerEntry> = {}
+    for (const [key, value] of Object.entries(config.servers)) {
+      // Mantiene el orden al renombrar.
+      if (key === form.originalName) next[name] = entry
+      else next[key] = value
+    }
+    if (!form.originalName) next[name] = entry
+    if (form.originalName && form.originalName !== name) delete mcpProbes[form.originalName]
+    mcpForm = null
+    saveMcpServers(next, config.root)
+    toast(tr('Servidor guardado', 'Server saved'))
+    render()
+  }))
+  actions.appendChild(button(tr('Cancelar', 'Cancel'), 'btn btn-ghost btn-sm', () => { mcpForm = null; render() }))
+  box.appendChild(actions)
+  return box
+}
+
+function mcpJsonEditor(currentSettings: Settings): HTMLElement {
+  const box = div('card mcp-json')
+  const editor = document.createElement('textarea')
+  editor.id = 'mcp-json-editor'
+  editor.className = 'json-editor'
+  editor.spellcheck = false
+  editor.value = mcpSource()
+  editor.oninput = () => { mcpDraft = editor.value; saveLocalState() }
+  box.appendChild(field(tr('Configuración (JSON)', 'Configuration (JSON)'), editor))
+  const actions = div('row')
+  actions.appendChild(button(tr('Validar', 'Validate'), 'btn btn-ghost btn-sm', () => post({ type: 'validateMcp', json: mcpSource() })))
+  actions.appendChild(button(tr('Guardar', 'Save'), 'btn btn-primary btn-sm', () => {
+    post({ type: 'saveMcpJson', json: mcpSource() })
+    toast(tr('Configuración MCP guardada', 'MCP configuration saved'))
+  }))
+  if (mcpDraft !== null && mcpDraft !== currentSettings.mcpJson) {
+    actions.appendChild(linkBtn(tr('Descartar cambios', 'Discard changes'), () => {
+      mcpDraft = null
+      saveLocalState()
+      post({ type: 'validateMcp', json: currentSettings.mcpJson })
+      render()
+    }))
+  }
+  box.appendChild(actions)
+  if (mcpValidation?.error) {
+    const error = div('status-err')
+    error.textContent = `✕ ${mcpValidation.error}`
+    box.appendChild(error)
+  }
+  return box
 }
 
 function traceabilityView(summary: TraceabilitySummary): HTMLElement {
@@ -1826,6 +2910,7 @@ const UI_EN = new Map<string, string>([
   ['(sin salida)', '(no output)'],
   ['Diagnosticar con IA', 'Diagnose with AI'],
   ['Ejecutando comando aprobado…', 'Running approved command…'],
+  ['Verificación automática tras aplicar cambios…', 'Automatic verification after applying changes…'],
   ['Centro Latinoamericano de Testing y Calidad de Software', 'Latin American Center for Software Testing and Quality'],
   ['visitanos y obten acceso a nuestros cursos, descuentos y conocimiento de calidad, testing y automatización.', 'Visit us to access our courses, discounts, and knowledge about quality, testing, and automation.'],
   ['Todos los datos de API keys, modelos, etc. se almacenan 100% localmente. Esta app no registra datos de ningún tipo.', 'All API key, model, and related data is stored 100% locally. This app does not collect or record any data.'],
@@ -1870,6 +2955,16 @@ const UI_EN = new Map<string, string>([
   ['Monocromo', 'Monochrome'],
   ['Solarizado', 'Solarized'],
   ['Tema', 'Theme'],
+  ['Key guardada · escribe una nueva para reemplazarla', 'Key saved · type a new one to replace it'],
+  ['Pega tu API key (si ya hay una guardada, déjalo vacío)', 'Paste your API key (leave empty to keep a saved one)'],
+  ['Detener', 'Stop'],
+  ['Autoaprobar MCP', 'Auto-approve MCP'],
+  ['Tú decides qué verificar tras aplicar cambios. QAPI nunca elige ni ejecuta una suite por su cuenta.', 'You decide what to verify after applying changes. QAPI never picks or runs a suite on its own.'],
+  ['Comando de verificación', 'Verification command'],
+  ['Guardar comando', 'Save command'],
+  ['Sugerir para este proyecto', 'Suggest for this project'],
+  ['Comando de verificación guardado', 'Verification command saved'],
+  ['Detener la solicitud en curso', 'Stop the current request'],
   ['Reducir tamaño de fuente', 'Decrease font size'],
   ['Aumentar tamaño de fuente', 'Increase font size'],
   ['Servidores MCP', 'MCP servers'],
@@ -1946,9 +3041,16 @@ function translateUiText(value: string): string {
     .replace(/ · deshecho/g, ' · undone')
 }
 
+/** Contenido del chat, diffs y salidas: nunca se traducen (alteraría evidencia). */
+const NO_I18N_SELECTOR = '.message-content, .diff-code, .run-output, .prop-path, .command-info code, pre, code, textarea, [data-no-i18n]'
+
 function localizeUi(container: HTMLElement) {
   if (settings?.language !== 'en') return
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => node.parentElement?.closest(NO_I18N_SELECTOR)
+      ? NodeFilter.FILTER_REJECT
+      : NodeFilter.FILTER_ACCEPT,
+  })
   let node: Node | null
   while ((node = walker.nextNode())) {
     if (node.nodeValue) node.nodeValue = translateUiText(node.nodeValue)

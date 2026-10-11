@@ -3,6 +3,7 @@ import { Store } from './store'
 import { ProjectIndex } from './projectIndex'
 import { QaPiViewProvider } from './panel'
 import { registerHooks } from './hooks'
+import { shutdownMcpPool } from './mcpRuntime'
 
 export function activate(ctx: vscode.ExtensionContext) {
   const store = new Store(ctx)
@@ -44,12 +45,15 @@ export function activate(ctx: vscode.ExtensionContext) {
       const primaryRootChanged = nextPrimaryRoot !== primaryRoot
       primaryRoot = nextPrimaryRoot
       if (primaryRootChanged) {
+        // La petición en curso pertenece al proyecto anterior: se cancela.
+        provider.cancelActiveRequest()
+        await shutdownMcpPool()
         await store.clearHistory()
         await store.clearMemory()
         await store.clearInvestigationMemory()
         await store.clearCheckpoints()
-        provider.post({ type: 'history', history: [] })
-        provider.post({ type: 'memory', text: '' })
+        provider.post({ type: 'history', history: [], usage: { used: 0, limit: 0, ratio: 0, needsSummary: false } })
+        provider.post({ type: 'memory', text: '', silent: true })
         provider.post({ type: 'checkpoints', checkpoints: [] })
       }
       provider.post({ type: 'project', projectName: index.projectName })
@@ -77,4 +81,6 @@ export function activate(ctx: vscode.ExtensionContext) {
   )
 }
 
-export function deactivate() {}
+export async function deactivate(): Promise<void> {
+  await shutdownMcpPool()
+}

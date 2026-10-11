@@ -103,6 +103,8 @@ export async function updateTaskStatus(
   if (document === undefined) throw new Error(`El spec ${safe} no tiene tasks.md`)
 
   const marker = status === 'completed' ? 'x' : status === 'in-progress' ? '-' : ' '
+  // Se conserva el fin de línea original: antes un tasks.md CRLF se reescribía entero en LF.
+  const eol = document.includes('\r\n') ? '\r\n' : '\n'
   const lines = document.split(/\r?\n/)
   let updated = false
   for (let index = 0; index < lines.length; index++) {
@@ -114,7 +116,13 @@ export async function updateTaskStatus(
   }
   if (!updated) throw new Error(`No encontré la tarea ${taskId} en el spec ${safe}`)
 
-  return writeSpecDocument(safe, 'tasks', lines.join('\n'))
+  // Escritura directa, sin el recorte de MAX_DOCUMENT_CHARS: cambiar una casilla
+  // nunca debe borrar las tareas finales de un tasks.md grande.
+  const root = specsRoot()
+  if (!root) throw new Error('No hay carpeta de proyecto abierta')
+  const uri = vscode.Uri.joinPath(root, safe, DOCUMENT_FILES.tasks)
+  await vscode.workspace.fs.writeFile(uri, Buffer.from(lines.join(eol), 'utf8'))
+  return readSpec(safe)
 }
 
 /** Contexto textual del spec para acotar el trabajo del agente a una tarea. */

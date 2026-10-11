@@ -1,8 +1,8 @@
 {
   "name": "qa-pi",
   "displayName": "QAPI - Agente de inteligencia artificial",
-  "description": "Agente de inteligencia artificial especializado en QA y automatización, con contexto del proyecto abierto.",
-  "version": "1.0.1",
+  "description": "Agente de IA para QA y automatización: crea y corrige pruebas con el contexto de tu proyecto, cambios revisables, skills, MCP y verificación. Gemini, Claude, OpenAI y Ollama.",
+  "version": "1.1.4",
   "publisher": "centyc",
   "author": "Felipe Farias Alfaro",
   "license": "MIT",
@@ -25,12 +25,22 @@
   "keywords": [
     "qa",
     "testing",
+    "test automation",
     "ai",
+    "agent",
     "chat",
+    "bdd",
+    "gherkin",
     "behave",
+    "pytest",
     "playwright",
     "cypress",
-    "selenium"
+    "selenium",
+    "mcp",
+    "ollama",
+    "claude",
+    "gemini",
+    "openai"
   ],
   "activationEvents": [
     "onView:qa-pi.chat"

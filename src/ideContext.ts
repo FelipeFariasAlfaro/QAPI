@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { ProjectIndex } from './projectIndex'
+import { redactSecrets as redactVault } from './secretVault'
 import { ArtifactInfo, IdeContextSnapshot, IdeDiagnostic, TestImpact } from './types'
 
 const MAX_ACTIVE_CHARS = 12_000
@@ -17,11 +18,13 @@ const MAX_ARTIFACT_TEXT_CHARS = 80_000
 const GIT_TIMEOUT_MS = 3_000
 const GIT_MAX_BUFFER = 512 * 1024
 
-const ARTIFACT_EXCLUDE = '**/{node_modules,.git,.venv,venv,out,__pycache__,.pytest_cache}/**'
+const ARTIFACT_EXCLUDE = '**/{node_modules,.git,.venv,venv,out,dist,__pycache__,.pytest_cache,site-packages}/**'
 const ARTIFACT_GLOBS = [
   '**/{target/surefire-reports,target/failsafe-reports,build/test-results}/**/*.{xml,txt}',
-  '**/{reports,report,logs,log,test-results,playwright-report,allure-results,allure-report}/**/*',
-  '**/*.{log,trace,png,jpg,jpeg,webp}',
+  '**/{reports,report,logs,log,test-results,playwright-report,allure-results,allure-report,screenshots,screenshot}/**/*',
+  // Imágenes sueltas no cuentan (assets del proyecto como media/icon.png); sólo
+  // las que están en carpetas de resultados, cubiertas por el glob anterior.
+  '**/*.{log,trace}',
   '**/{*report*,*results*,*trace*,*screenshot*}.{html,htm,xml,json,txt,zip}',
 ]
 
@@ -109,7 +112,22 @@ export function formatIdeContext(snapshot: IdeContextSnapshot): string {
 }
 
 /** Descubre evidencia reciente de ejecuciones y devuelve sólo metadatos. */
-export async function discoverArtifacts(): Promise<ArtifactInfo[]> {
+let artifactCache: { root: string; at: number; value: Promise<ArtifactInfo[]> } | undefined
+const ARTIFACT_CACHE_MS = 10_000
+
+/** Cacheado unos segundos: list/read_test_artifact lo pedían en cada tool call. */
+export function discoverArtifacts(): Promise<ArtifactInfo[]> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.toString() || ''
+  if (artifactCache && artifactCache.root === root && Date.now() - artifactCache.at < ARTIFACT_CACHE_MS) {
+    return artifactCache.value
+  }
+  const value = scanArtifacts()
+  artifactCache = { root, at: Date.now(), value }
+  value.catch(() => { artifactCache = undefined })
+  return value
+}
+
+async function scanArtifacts(): Promise<ArtifactInfo[]> {
   if (!vscode.workspace.workspaceFolders?.length) return []
 
   const settled = await Promise.allSettled(
@@ -272,10 +290,12 @@ function emptyGit(): GitCapture {
 }
 
 async function captureGit(cwd: string): Promise<GitCapture> {
+  // core.quotePath=false: rutas con tildes salen tal cual (no "caracter\303\255stica").
+  // --untracked-files=normal: con "all", un venv no ignorado listaba miles de archivos.
   const [status, diff, names] = await Promise.all([
-    runGit(cwd, ['status', '--short', '--untracked-files=all']),
-    runGit(cwd, ['diff', '--no-ext-diff', '--unified=3', 'HEAD', '--']),
-    runGit(cwd, ['diff', '--name-only', '--diff-filter=ACDMRTUXB', 'HEAD', '--']),
+    runGit(cwd, ['-c', 'core.quotePath=false', 'status', '--short', '--untracked-files=normal']),
+    runGit(cwd, ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--unified=3', 'HEAD', '--']),
+    runGit(cwd, ['-c', 'core.quotePath=false', 'diff', '--name-only', '--diff-filter=ACDMRTUXB', 'HEAD', '--']),
   ])
   const statusPaths = pathsFromStatus(status)
   const diffPaths = names.split(/\r?\n/).map(normalizeRelativePath).filter(Boolean)
@@ -332,14 +352,22 @@ function isSafeWorkspaceDocument(uri: vscode.Uri): boolean {
   const folder = vscode.workspace.getWorkspaceFolder(uri)
   if (!folder || uri.scheme !== 'file') return false
   const relative = path.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, '/')
-  return !/(^|\/)(?:\.env(?:\.|$)|\.npmrc$|\.pypirc$|credentials?|secrets?|id_rsa|id_ed25519)(\/|$)/i.test(relative)
+  return !isSensitiveRelativePath(relative)
 }
 
+/**
+ * Archivos cuyo contenido nunca se envía como contexto. El patrón anterior sólo
+ * bloqueaba nombres exactos: `.env.local`, `credentials.json` o `secrets.yaml` pasaban.
+ */
+export function isSensitiveRelativePath(relative: string): boolean {
+  return /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|credentials?(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|id_rsa|id_ed25519|id_ecdsa)(?:\/|$)/i.test(relative)
+    || /\.(?:pem|key|p12|pfx|jks|keystore)$/i.test(relative)
+    || /(?:^|\/)\.git(?:\/|$)/.test(relative)
+}
+
+/** Mismos marcadores reversibles que el resto del contexto (ver secretVault.ts). */
 function redactSecrets(value: string): string {
-  return value
-    .replace(/((?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*["']?)[^\s"']+/gi, '$1[REDACTED]')
-    .replace(/\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{16,}\b/g, '[REDACTED_TOKEN]')
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]{12,}/gi, '$1[REDACTED]')
+  return redactVault(value)
 }
 
 function displayPath(uri: vscode.Uri): string {

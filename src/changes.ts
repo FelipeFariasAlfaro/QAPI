@@ -1,6 +1,6 @@
 import * as vscode from 'vscode'
 import { createHash, randomUUID } from 'crypto'
-import { realpath, stat } from 'fs/promises'
+import { lstat, realpath, stat } from 'fs/promises'
 import * as nodePath from 'path'
 import { Checkpoint, CheckpointFile, DiffHunk, FileProposal, ProposalSelection } from './types'
 
@@ -221,7 +221,7 @@ export async function applyProposalSelections(
   selections: ProposalSelection[],
   label: string,
   persistCheckpoint?: (checkpoint: Checkpoint) => Promise<void>,
-): Promise<{ applied: FileProposal[]; checkpoint: Checkpoint }> {
+): Promise<{ applied: FileProposal[]; checkpoint: Checkpoint; unverified: string[] }> {
   const root = workspaceRoot()
   const proposalById = new Map<string, FileProposal>()
   const proposalPaths = new Set<string>()
@@ -307,6 +307,9 @@ export async function applyProposalSelections(
   }
 
   const finalStates = await Promise.all(prepared.map((item) => readOptional(item.uri)))
+  // Comprobación contra el disco (no contra el editor abierto, que puede ir
+  // atrasado): cada archivo debe existir y tener exactamente lo que se escribió.
+  const unverified = await verifyWrittenFiles(prepared)
   checkpoint = {
     ...checkpoint,
     pending: false,
@@ -343,7 +346,22 @@ export async function applyProposalSelections(
       hunks,
     }
   })
-  return { applied, checkpoint }
+  return { applied, checkpoint, unverified }
+}
+
+/** Devuelve "ruta: motivo" por cada archivo que no quedó en disco como se esperaba. */
+async function verifyWrittenFiles(items: { path: string; uri: vscode.Uri; after: string }[]): Promise<string[]> {
+  const problems: string[] = []
+  for (const item of items) {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(item.uri)
+      const onDisk = Buffer.from(bytes).toString('utf8')
+      if (hashText(onDisk) !== hashText(item.after)) problems.push(`${item.path}: el contenido en disco no coincide con el aplicado`)
+    } catch (error) {
+      problems.push(isNotFound(error) ? `${item.path}: no existe en el proyecto` : `${item.path}: ${errorMessage(error)}`)
+    }
+  }
+  return problems
 }
 
 /** Reconciles a checkpoint left pending by an interrupted application. */
@@ -443,6 +461,10 @@ function safeRelativePath(input: string): string {
   }
   const normalized = segments.filter((segment) => segment && segment !== '.').join('/')
   if (!normalized) throw new Error(`Ruta insegura: ${input}`)
+  // Escribir en .git permitiría instalar hooks que se ejecutan en el próximo commit.
+  if (normalized.split('/').some((segment) => segment.toLowerCase() === '.git')) {
+    throw new Error(`Ruta protegida: ${input}`)
+  }
   return normalized
 }
 
@@ -451,15 +473,29 @@ async function assertRealPathInside(root: vscode.Uri, relative: string): Promise
   const rootReal = await realpath(root.fsPath)
   const target = nodePath.resolve(root.fsPath, relative)
   let probe = target
-  while (probe !== root.fsPath) {
+  // Sube hasta el primer componente existente. Se usa lstat: con stat, un
+  // symlink colgante (destino aún inexistente fuera del workspace) parecía no
+  // existir, se validaba el padre y luego writeFile seguía el enlace hacia fuera.
+  for (;;) {
+    let info: Awaited<ReturnType<typeof lstat>> | undefined
     try {
-      await stat(probe)
-      break
+      info = await lstat(probe)
     } catch {
-      const parent = nodePath.dirname(probe)
-      if (parent === probe) break
-      probe = parent
+      info = undefined
     }
+    if (info) {
+      if (info.isSymbolicLink()) {
+        try {
+          await stat(probe)
+        } catch {
+          throw new Error(`Ruta con symlink colgante: ${relative}`)
+        }
+      }
+      break
+    }
+    const parent = nodePath.dirname(probe)
+    if (parent === probe) break
+    probe = parent
   }
   const probeReal = await realpath(probe)
   const rel = nodePath.relative(rootReal, probeReal)

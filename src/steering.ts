@@ -107,7 +107,8 @@ async function expandReferences(body: string): Promise<string> {
         replacement = `referencia ${relative}:\n\`\`\`\n${content}\n\`\`\``
       } catch { /* se conserva el aviso de no resuelta */ }
     }
-    expanded = expanded.replace(match[0], replacement)
+    // Replacer como función: `$&`, `$'` o `$$` dentro del archivo referenciado se interpretaban.
+    expanded = expanded.replace(match[0], () => replacement)
   }
   return expanded.replace(pattern, '')
 }
@@ -136,22 +137,52 @@ function contextPaths(ideContext?: IdeContextSnapshot): string[] {
   return [...paths].map((path) => path.replace(/\\/g, '/').replace(/^(?:\.\/|\/)+/, ''))
 }
 
-/** Soporte acotado de globs: `**`, `*` y `?`, suficiente para rutas y extensiones. */
-function matchesGlob(path: string, pattern?: string): boolean {
+/** Globs con `**`, `*`, `?` y `{a,b}`. Un patrón sin `/` coincide con el nombre en cualquier carpeta. */
+export function matchesGlob(path: string, pattern?: string): boolean {
   if (!pattern) return false
   const normalized = pattern.trim().replace(/\\/g, '/').replace(/^(?:\.\/|\/)+/, '')
   if (!normalized) return false
-  const source = normalized
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*\//g, '(?:.*/)?')
-    .replace(/\*\*/g, '.*')
-    .replace(/\*/g, '[^/]*')
-    .replace(/\?/g, '[^/]')
+  const source = globToRegExpSource(normalized.includes('/') ? normalized : `**/${normalized}`)
   try {
     return new RegExp(`^${source}$`, 'i').test(path)
   } catch {
     return false
   }
+}
+
+/**
+ * Traduce el glob en una sola pasada. La versión anterior encadenaba
+ * `.replace` y las sustituciones se pisaban (el `.*` de `**` volvía a
+ * reescribirse), así que `**\/*.feature` nunca coincidía.
+ */
+export function globToRegExpSource(glob: string): string {
+  let out = ''
+  let braceDepth = 0
+  for (let i = 0; i < glob.length; i++) {
+    const char = glob[i]
+    if (char === '*') {
+      if (glob[i + 1] === '*') {
+        const slashAfter = glob[i + 2] === '/'
+        out += slashAfter ? '(?:.*/)?' : '.*'
+        i += slashAfter ? 2 : 1
+      } else {
+        out += '[^/]*'
+      }
+    } else if (char === '?') {
+      out += '[^/]'
+    } else if (char === '{') {
+      braceDepth++
+      out += '(?:'
+    } else if (char === '}' && braceDepth > 0) {
+      braceDepth--
+      out += ')'
+    } else if (char === ',' && braceDepth > 0) {
+      out += '|'
+    } else {
+      out += char.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    }
+  }
+  return out
 }
 
 function safeRelative(value: string): string | undefined {

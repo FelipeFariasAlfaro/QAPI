@@ -9,6 +9,7 @@
 // verificación y checkpoints ya vigentes.
 import * as vscode from 'vscode'
 import { ProjectIndex } from './projectIndex'
+import { globToRegExpSource } from './steering'
 import { CustomAgentDefinition } from './types'
 
 const AGENTS_DIR = '.qapi/agents'
@@ -189,12 +190,23 @@ export async function buildRunInstruction(
 }
 
 function resolveOutputPath(agent: CustomAgentDefinition, selectedFiles: string[]): string {
-  const template = agent.outputPathTemplate || 'docs/{name}.md'
+  const template = safeOutputTemplate(agent.outputPathTemplate)
+  const now = new Date()
+  const date = now.toISOString().slice(0, 10)
+  // Nombre legible y único por ejecución (antes era un sufijo base36 opaco).
+  const stamp = `${date.replace(/-/g, '')}-${now.toISOString().slice(11, 16).replace(':', '')}`
   const baseName = selectedFiles.length === 1
     ? fileBaseName(selectedFiles[0])
-    : `${slugifyAgentName(agent.name)}-${Date.now().toString(36)}`
-  const date = new Date().toISOString().slice(0, 10)
-  return template.replace('{name}', baseName).replace('{date}', date)
+    : `${slugifyAgentName(agent.name)}-${stamp}`
+  return template.split('{name}').join(baseName).split('{date}').join(date)
+}
+
+/** Plantilla de salida dentro del workspace; si no es válida se usa la predeterminada. */
+function safeOutputTemplate(value: string | undefined): string {
+  const template = String(value || '').trim().replace(/\\/g, '/')
+  if (!template || template.startsWith('/') || /^[a-zA-Z]:\//.test(template) || template.includes('\0')) return 'docs/{name}.md'
+  if (template.split('/').some((part) => part === '..' || part === '.git')) return 'docs/{name}.md'
+  return template
 }
 
 function fileBaseName(path: string): string {
@@ -218,7 +230,7 @@ function normalizeAgent(candidate: any, fallbackSlug: string): CustomAgentDefini
     inputGlob: inputMode === 'files' && candidate?.inputGlob ? String(candidate.inputGlob).trim().slice(0, 200) : undefined,
     outputMode,
     outputPathTemplate: outputMode === 'file'
-      ? String(candidate?.outputPathTemplate || 'docs/{name}.md').trim().slice(0, 200)
+      ? safeOutputTemplate(String(candidate?.outputPathTemplate || '').slice(0, 200))
       : undefined,
     builtIn: false,
   }
@@ -229,18 +241,8 @@ function matchesGlob(path: string, pattern: string): boolean {
   const normalized = pattern.trim().replace(/\\/g, '/').replace(/^(?:\.\/|\/)+/, '')
   if (!normalized) return false
 
-  // Tokeniza en literales/comodines/grupos antes de escapar, así cada
-  // fragmento se traduce a regex sin que un escape interfiera con otro.
-  const tokens = normalized.split(/(\*\*\/|\*\*|\*|\?|\{[^{}]*\})/g).filter((token) => token !== '')
-  const source = tokens.map((token) => {
-    if (token === '**/') return '(?:.*/)?'
-    if (token === '**') return '.*'
-    if (token === '*') return '[^/]*'
-    if (token === '?') return '[^/]'
-    const brace = token.match(/^\{([^{}]*)\}$/)
-    if (brace) return `(?:${brace[1].split(',').map((alt) => escapeRegex(alt.trim())).join('|')})`
-    return escapeRegex(token)
-  }).join('')
+  // Mismo traductor que steering: admite comodines dentro de `{a,b}`.
+  const source = globToRegExpSource(normalized)
 
   try {
     return new RegExp(`^${source}$`, 'i').test(path)
@@ -249,6 +251,4 @@ function matchesGlob(path: string, pattern: string): boolean {
   }
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.+^${}()|[\]\\*?]/g, '\\$&')
-}
+

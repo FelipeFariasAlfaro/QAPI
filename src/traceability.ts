@@ -5,9 +5,14 @@ const MAX_GAPS = 20
 const MAX_EVIDENCE = 24
 const MAX_ITEM_LENGTH = 240
 
-const SCENARIO_RE = /^\s*(?:Scenario(?:\s+Outline)?|Escenario|Esquema\s+del\s+escenario)\s*:/i
-const STEP_RE = /^\s*(?:Given|When|Then|And|But|Dado|Dada|Dados|Dadas|Cuando|Entonces|Y|Pero)\s+(.+?)\s*$/i
-const REQUIREMENT_RE = /@[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b|@REQ\b|\bREQ-[A-Z0-9][A-Z0-9-]*\b/gi
+const SCENARIO_RE = /^\s*(?:Scenario(?:\s+(?:Outline|Template))?|Example|Escenario|Ejemplo|Esquema\s+del\s+escenario)\s*:/i
+const STEP_RE = /^\s*(?:Given|When|Then|And|But|\*|Dado|Dada|Dados|Dadas|Cuando|Entonces|Y|E|Pero)\s+(.+?)\s*$/i
+/**
+ * IDs de requisito con forma de ticket (`@ABC-123`, `REQ-12`) o el tag `@REQ`.
+ * Sensible a mayúsculas y precedido de espacio: antes `user@foo-bar.com` o el
+ * tag `@smoke-test` aparecían como requisitos.
+ */
+const REQUIREMENT_RE = /(?:^|[\s(,])@([A-Z][A-Z0-9]*-\d+)\b|(?:^|[\s(,])@(REQ)\b|\b(REQ-[A-Z0-9][A-Z0-9-]*)\b/g
 
 interface IndexedFile {
   path: string
@@ -27,15 +32,17 @@ interface FeatureAnalysis {
  * scenario, test or step has executed successfully.
  */
 export async function buildTraceability(index: ProjectIndex): Promise<TraceabilitySummary> {
+  // El contenido ya está en memoria en el índice: antes se releían hasta 1500
+  // archivos desde disco en paralelo (lento y con riesgo de EMFILE) y se
+  // truncaban a 20k caracteres.
   const paths = [...new Set(index.paths)].sort((a, b) => a.localeCompare(b))
-  const files = (await Promise.all(paths.map(async (path): Promise<IndexedFile | undefined> => {
-    try {
-      const content = await index.readFile(path)
-      return content === undefined ? undefined : { path, content }
-    } catch {
-      return undefined
-    }
-  }))).filter((file): file is IndexedFile => file !== undefined)
+  const files = paths
+    .map((path): IndexedFile | undefined => {
+      const snapshot = index.fileSnapshot(path, 400_000)
+      return snapshot ? { path, content: snapshot.content } : undefined
+    })
+    .filter((file): file is IndexedFile => file !== undefined)
+  const requirementsByPath = new Map(files.map((file) => [file.path, requirementCandidates(file)]))
 
   const featureFiles = files.filter((file) => file.path.toLowerCase().endsWith('.feature'))
   const features = featureFiles.map(analyzeFeature)
@@ -50,7 +57,7 @@ export async function buildTraceability(index: ProjectIndex): Promise<Traceabili
   )
 
   const testFiles = files.filter((file) => isTestPath(file.path))
-  const requirementSources = collectRequirementSources(files)
+  const requirementSources = collectRequirementSources(files, requirementsByPath)
   const requirements = [...requirementSources.keys()].sort(naturalCompare)
   const gaps: string[] = []
   const evidence: string[] = [
@@ -87,7 +94,7 @@ export async function buildTraceability(index: ProjectIndex): Promise<Traceabili
     addBounded(gaps, 'No se detectaron archivos de prueba por ruta, nombre o extensión.', MAX_GAPS)
   } else {
     for (const test of testFiles.slice(0, 8)) {
-      const relations = relatedPaths(test, files, requirements)
+      const relations = relatedPaths(test, files, requirementsByPath)
       addBounded(
         evidence,
         relations.length > 0
@@ -143,9 +150,12 @@ export function formatTraceability(summary: TraceabilitySummary): string {
 function analyzeFeature(file: IndexedFile): FeatureAnalysis {
   let scenarios = 0
   const steps: string[] = []
+  let inDocString = false
   for (const rawLine of file.content.split(/\r?\n/)) {
     const line = rawLine.trim()
-    if (!line || line.startsWith('#')) continue
+    // Las líneas dentro de docstrings ("""/```) no son steps.
+    if (line.startsWith('"""') || line.startsWith('```')) { inDocString = !inDocString; continue }
+    if (inDocString || !line || line.startsWith('#') || line.startsWith('|')) continue
     if (SCENARIO_RE.test(line)) scenarios++
     const step = line.match(STEP_RE)
     if (step) steps.push(step[1].trim())
@@ -169,10 +179,16 @@ function safeStepDefinitions(index: ProjectIndex): { pattern: string; file: stri
   }
 }
 
-function collectRequirementSources(files: IndexedFile[]): Map<string, string[]> {
+/** Sólo .feature, pruebas y documentación pueden declarar requisitos (no lockfiles ni JSON). */
+function requirementCandidates(file: IndexedFile): string[] {
+  if (!/\.(?:feature|md)$/i.test(file.path) && !isTestPath(file.path)) return []
+  return extractRequirements(file.content)
+}
+
+function collectRequirementSources(files: IndexedFile[], byPath: Map<string, string[]>): Map<string, string[]> {
   const sources = new Map<string, string[]>()
   for (const file of files) {
-    for (const requirement of extractRequirements(file.content)) {
+    for (const requirement of byPath.get(file.path) || []) {
       const paths = sources.get(requirement) || []
       if (!paths.includes(file.path)) paths.push(file.path)
       sources.set(requirement, paths)
@@ -186,8 +202,8 @@ function extractRequirements(content: string): string[] {
   REQUIREMENT_RE.lastIndex = 0
   let match: RegExpExecArray | null
   while ((match = REQUIREMENT_RE.exec(content)) !== null) {
-    const requirement = match[0].replace(/^@/, '').toUpperCase()
-    if (!requirements.includes(requirement)) requirements.push(requirement)
+    const requirement = (match[1] || match[2] || match[3] || '').toUpperCase()
+    if (requirement && !requirements.includes(requirement)) requirements.push(requirement)
   }
   return requirements
 }
@@ -216,21 +232,22 @@ function isTestPath(path: string): boolean {
   return /\/(?:tests?|specs?|__tests__|e2e|integration)(?:\/|$)/.test(normalized)
 }
 
-function relatedPaths(test: IndexedFile, files: IndexedFile[], requirements: string[]): string[] {
+function relatedPaths(test: IndexedFile, files: IndexedFile[], requirementsByPath: Map<string, string[]>): string[] {
   const related = new Set<string>()
   const testStem = pathStem(test.path)
-  const testRequirements = new Set(extractRequirements(test.content))
+  const testRequirements = new Set(requirementsByPath.get(test.path) || [])
 
   for (const candidate of files) {
     if (candidate.path === test.path || isTestPath(candidate.path)) continue
     const candidateStem = pathStem(candidate.path)
-    const sameBase = Boolean(testStem && candidateStem && (
-      testStem === candidateStem || testStem.startsWith(candidateStem) || candidateStem.startsWith(testStem)
+    // Igualdad de nombre base (o prefijo seguido de separador): "app" ya no se
+    // relaciona con "application_test".
+    const sameBase = Boolean(testStem && candidateStem && candidateStem.length >= 3 && (
+      testStem === candidateStem || testStem.startsWith(`${candidateStem}_`) || testStem.startsWith(`${candidateStem}-`)
     ))
     const imported = importsPath(test.content, candidate.path)
-    const sharedRequirement = requirements.some((requirement) =>
-      testRequirements.has(requirement) && extractRequirements(candidate.content).includes(requirement),
-    )
+    const sharedRequirement = testRequirements.size > 0
+      && (requirementsByPath.get(candidate.path) || []).some((requirement) => testRequirements.has(requirement))
     if (sameBase || imported || sharedRequirement) related.add(candidate.path)
     if (related.size >= 4) break
   }
@@ -249,12 +266,10 @@ function importsPath(content: string, candidatePath: string): boolean {
   const normalizedContent = content.replace(/\\/g, '/').toLowerCase()
   const withoutExtension = candidatePath.replace(/\\/g, '/').replace(/\.[^.\/]+$/, '').toLowerCase()
   const basename = withoutExtension.split('/').pop() || ''
-  return Boolean(basename && (
-    normalizedContent.includes(`/${basename}'`) ||
-    normalizedContent.includes(`/${basename}"`) ||
-    normalizedContent.includes(`from ${basename} import`) ||
-    normalizedContent.includes(`import ${basename}`)
-  ))
+  if (!basename || basename.length < 2) return false
+  const escaped = basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // Límites de palabra: antes `import a` coincidía con `import axios`.
+  return new RegExp(`/${escaped}(?:\\.[\\w]+)?['"]|from\\s+[\\w.]*\\b${escaped}\\s+import\\b|\\bimport\\s+[\\w.]*\\b${escaped}\\b(?![\\w-])`).test(normalizedContent)
 }
 
 function summarizePaths(paths: string[]): string {

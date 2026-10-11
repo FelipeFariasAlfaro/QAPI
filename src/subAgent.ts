@@ -23,7 +23,7 @@ const SUB_AGENT_TOOLS: ToolDef[] = [
     parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
   },
   {
-    name: 'search_code', description: 'Busca texto o regex en el proyecto.',
+    name: 'search_code', description: 'Busca texto literal (sin distinguir mayúsculas) en el proyecto. Para una expresión regular usa la forma /patrón/.',
     parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
   },
 ]
@@ -34,7 +34,12 @@ export interface SubAgentContext {
   language: UiLanguage
   redact: (value: string) => string
   onProgress?: (detail: string) => void
+  /** Cancelación del turno principal: el sub-agente deja de gastar llamadas. */
+  signal?: AbortSignal
 }
+
+/** La revisión es opcional: nunca debe retrasar el turno más de esto. */
+const REVIEW_TIMEOUT_MS = 60_000
 
 /**
  * Investiga el proyecto en un contexto aparte y devuelve sólo un informe corto.
@@ -74,7 +79,8 @@ export async function investigateCodebase(
   for (let step = 0; step < MAX_STEPS; step++) {
     let response
     try {
-      response = await chatWithTools(context.provider, messages, SUB_AGENT_TOOLS)
+      if (context.signal?.aborted) return ''
+      response = await chatWithTools(context.provider, messages, SUB_AGENT_TOOLS, { signal: context.signal })
     } catch {
       return ''
     }
@@ -104,7 +110,7 @@ export async function investigateCodebase(
           ? 'Cierra ahora con el informe final breve usando sólo lo verificado.'
           : 'Close now with the short final report using only verified information.',
       },
-    ])
+    ], { signal: context.signal })
     return closing.trim().slice(0, MAX_REPORT_CHARS)
   } catch {
     return ''
@@ -146,7 +152,7 @@ export async function reviewProposals(
         role: 'user',
         content: `${es ? 'INTENCIÓN DEL USUARIO:' : 'USER INTENT:'} ${intent.slice(0, 2_000)}\n\n${es ? 'CAMBIOS PROPUESTOS:' : 'PROPOSED CHANGES:'}\n${diff}`,
       },
-    ])
+    ], { signal: context.signal, timeoutMs: REVIEW_TIMEOUT_MS })
 
     const text = response.trim()
     if (!text || /^(?:SIN_OBSERVACIONES|NO_FINDINGS)\b/i.test(text)) return ''
@@ -168,7 +174,7 @@ async function runReadOnlyTool(
   if (name === 'read_file') {
     const path = String(args?.path || '')
     const content = await context.index.readFile(path)
-    return content === undefined ? `read_file(${path}) → no existe.` : `read_file(${path}):\n${content}`
+    return content === undefined ? `read_file(${path}) → no existe.` : `read_file(${path}):\n${context.redact(content)}`
   }
   if (name === 'search_code') {
     const hits = context.index.searchCode(String(args?.query || ''), 40)
