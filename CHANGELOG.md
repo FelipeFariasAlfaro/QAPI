@@ -5,6 +5,9 @@ Todos los cambios relevantes de QAPI se documentan en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y el proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
 ## [Unreleased]
+## [1.2.1] - 2026-10-19
+### Documentación
+- Página del marketplace actualizada: sección "Novedades en 1.2.0", tabla de herramientas del agente, ajustes en MCP, Configuración y Privacidad, nueva descripción y palabras clave (`memory`, `context`, `tokens`).
 ## [1.2.0] - 2026-10-19
 ### Añadido
 - **Memoria holográfica nativa** (activa por defecto, Configuración > Memoria holográfica): fragmenta el proyecto en funciones, escenarios, pasos y secciones, recupera por resonancia vectorial combinada con BM25 y un glosario bilingüe de QA, informa en cada mensaje qué cambió desde el anterior (también entre sesiones), guarda asociaciones holográficas reversibles (escenario → paso, prueba → código, uso de símbolos), refuerza lo que el agente usa y conserva notas con fuente que se marcan obsoletas al cambiar. Local, privada y sin dependencias ni servicios externos.

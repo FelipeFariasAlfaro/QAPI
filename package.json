@@ -1,8 +1,8 @@
 {
   "name": "qa-pi",
   "displayName": "QAPI - Agente de inteligencia artificial",
-  "description": "Agente de IA para QA y automatización: crea y corrige pruebas con el contexto de tu proyecto, cambios revisables, skills, MCP y verificación. Gemini, Claude, OpenAI y Ollama.",
-  "version": "1.2.0",
+  "description": "Agente de IA para QA y automatización: crea y corrige pruebas con el contexto de tu proyecto, memoria holográfica local que ahorra tokens, cambios revisables, skills, MCP y verificación. Gemini, Claude, OpenAI y Ollama.",
+  "version": "1.2.1",
   "publisher": "centyc",
   "author": "Felipe Farias Alfaro",
   "license": "MIT",
@@ -40,7 +40,10 @@
     "ollama",
     "claude",
     "gemini",
-    "openai"
+    "openai",
+    "memory",
+    "context",
+    "tokens"
   ],
   "activationEvents": [
     "onView:qa-pi.chat"

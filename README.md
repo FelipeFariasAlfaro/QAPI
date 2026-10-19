@@ -2,15 +2,26 @@
 
 QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en QA, testing y automatización. Analiza el workspace abierto, investiga con herramientas propias y prepara cambios de código, pruebas y comandos para que tú los revises y apruebes.
 
-- Versión actual: `1.2.0`
+- Versión actual: `1.2.1`
 - VS Code: `1.85.0` o superior
 - Licencia: [MIT](LICENSE)
 - Historial de cambios: [CHANGELOG.md](CHANGELOG.md)
 - Repositorio oficial: [github.com/FelipeFariasAlfaro/QAPI](https://github.com/FelipeFariasAlfaro/QAPI)
 
+## Novedades en 1.2.0
+
+- **Memoria holográfica nativa:** QAPI conoce el estado del proyecto en cada mensaje (qué funciones, escenarios o archivos cambiaron, también entre sesiones) y envía al modelo fragmentos pequeños en lugar de archivos completos. En repositorios de prueba el contexto por mensaje bajó de ~24.000 a ~9.000 caracteres y la búsqueda en español sobre código en inglés mejoró. Es local y no usa servicios externos.
+- **Agentes activables:** cada agente, incluidos los integrados, se puede activar o desactivar por proyecto.
+- **Diez temas nuevos** (18 en total) e interfaz rediseñada en Skills, Agentes, MCP y Configuración, con ayudas emergentes en lugar de textos fijos.
+- **MCP más confiable:** las activaciones ya no se pierden y el agente usa las tools de los servidores activos en vez de improvisar comandos de shell.
+- Correcciones en respuestas vacías con algunos modelos, contraste del tema Claro y exclusión de sesiones del navegador del contexto.
+
+Detalle completo en el [CHANGELOG](CHANGELOG.md).
+
 ## Características principales
 
 - **Agente QA con contexto real del proyecto:** archivo activo, selección, editores visibles, Problems, Git status y Git diff, mapa del repositorio y búsqueda local.
+- **Memoria holográfica nativa:** el agente conoce el estado del proyecto en cada mensaje y recibe fragmentos (funciones, escenarios, pasos, secciones) en lugar de archivos completos, con menos tokens por mensaje. Entiende preguntas en español sobre código en inglés y guarda notas verificadas que se marcan obsoletas si su fuente cambia.
 - **Detección del stack:** lenguajes, frameworks de prueba (Behave, pytest, Playwright, Cypress, Jest, JUnit y otros), manifiestos y convenciones Gherkin, incluidos los steps existentes para reutilizarlos.
 - **Cambios revisables:** cada archivo propuesto explica qué cambia y por qué, con diff por archivo y por hunk, aplicación selectiva, checkpoints y deshacer seguro.
 - **Verificación de lo creado:** QAPI comprueba que los archivos que el agente dice haber creado existan, y al aplicar relee cada archivo desde el disco para confirmar su contenido.
@@ -19,13 +30,12 @@ QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en
 - **Verificación definida por ti:** tú eliges el comando y su alcance (por ejemplo `behave {tests}` para correr sólo las pruebas que cambiaron). QAPI nunca elige ni ejecuta una suite por su cuenta.
 - **Comandos con aprobación:** el agente propone comandos de test, lint o build y sólo se ejecutan cuando los apruebas. Puedes detenerlos en cualquier momento.
 - **Selector de modelo en el chat** y botón **Detener** para cancelar una respuesta en curso.
-- **Agentes personalizados** con instrucción fija, entrada por archivos o texto libre y salida al chat o a un archivo.
+- **Agentes personalizados** con instrucción fija, entrada por archivos o texto libre y salida al chat o a un archivo; cada uno se activa o desactiva por proyecto.
 - Diagnóstico de reportes, logs y traces; análisis de pruebas impactadas por el Git diff; trazabilidad estática entre requisitos, escenarios, steps y pruebas.
-- **Memoria holográfica nativa:** el agente conoce el estado del proyecto en cada mensaje (qué funciones, escenarios o archivos cambiaron) y recibe fragmentos pequeños en lugar de archivos completos, con menos tokens por mensaje.
 - Memoria editable por proyecto y memoria automática de investigación validada por hash.
 - Proveedores Gemini, Claude, OpenAI y Ollama local.
 - Privacidad: sin telemetría, API keys en `SecretStorage` y redacción de secretos antes de enviar contexto al modelo.
-- Interfaz en español o inglés, 18 temas visuales y tamaño de fuente ajustable.
+- Interfaz en español o inglés, 18 temas visuales, ayudas emergentes y tamaño de fuente ajustable.
 
 ## Instalación
 
@@ -59,7 +69,7 @@ Es el área principal de trabajo. Muestra el proyecto activo, el estado del índ
 
 - Escribe tu solicitud y usa `#` para añadir contexto explícito: `#file:ruta`, `#folder:ruta`, `#problems`, `#gitDiff` o `#skill:nombre`.
 - **Selector de modelo:** cambia el modelo para los próximos mensajes sin ir a Configuración.
-- **Autoaprobar MCP:** aparece cuando hay servidores MCP activos. Encendido, las tools MCP se ejecutan sin pedir confirmación en cada llamada.
+- **Autoaprobar MCP:** aparece cuando hay servidores MCP activos o mientras la autoaprobación siga encendida. Encendido, las tools MCP se ejecutan sin pedir confirmación en cada llamada.
 - **Enviar / Detener:** mientras QAPI trabaja, el botón cambia a **Detener** y cancela la respuesta o el comando en curso.
 - Botones **-a/+A** en el encabezado para ajustar el tamaño de fuente, y **Nueva** para empezar una conversación limpia.
 
@@ -67,7 +77,7 @@ Puedes seguir escribiendo y desplazarte por el historial mientras llega una resp
 
 #### Contexto utilizado
 
-Cada respuesta indica qué fuentes usó: archivo activo, selección, archivos visibles, Problems, Git, metadatos de terminales, memoria automática y skills aplicadas. VS Code no permite leer el historial de terminales ajenas; QAPI sólo usa sus metadatos y la salida de procesos iniciados por la propia extensión.
+Cada respuesta indica qué fuentes usó: archivo activo, selección, archivos visibles, Problems, Git, metadatos de terminales, memoria holográfica, memoria automática y skills aplicadas. VS Code no permite leer el historial de terminales ajenas; QAPI sólo usa sus metadatos y la salida de procesos iniciados por la propia extensión.
 
 #### Propuestas de cambios
 
@@ -84,6 +94,18 @@ Cuando el agente necesita modificar el proyecto:
 Si la respuesta del agente menciona haber creado archivos que no preparó y que no existen en el proyecto, QAPI le pide que los prepare. Si siguen faltando, la respuesta lo advierte claramente.
 
 Las herramientas de escritura sólo se habilitan cuando la solicitud expresa intención de cambio o confirma una propuesta inmediata. Saludos como `hola` se responden sin herramientas ni contexto del workspace. QAPI comprueba que los archivos no hayan cambiado desde que se preparó la propuesta y nunca sobrescribe conflictos de forma silenciosa. Nunca escribe en `.git`.
+
+#### Herramientas del agente
+
+Para investigar, el agente usa primero la memoria y sólo después lee archivos:
+
+| Herramienta | Uso |
+| --- | --- |
+| `recall_memory` | Busca fragmentos relevantes, sus asociados y las notas aprendidas |
+| `read_chunk` | Lee un fragmento completo por su id (una función, un escenario, una sección) |
+| `read_file` | Lee un archivo; con `startLine`/`endLine`, sólo ese rango |
+| `search_code` | Busca un texto exacto (un identificador o un mensaje literal) |
+| `remember` | Guarda una nota breve con los archivos que la respaldan |
 
 #### Comandos y ejecuciones
 
@@ -124,6 +146,8 @@ Conecta herramientas externas al agente mediante servidores MCP por `stdio`.
 - **Probar conexión** inicia el servidor, lista sus tools y lo cierra, para comprobar que funciona antes de usarlo.
 - Activa cada servidor con su interruptor. Los servidores activos se reutilizan entre mensajes y se apagan tras 10 minutos sin uso.
 
+Con un servidor activo, el agente usa sus tools en lugar de improvisar comandos de shell equivalentes. Si la petición o una skill menciona un servidor configurado pero inactivo, el agente te pide activarlo.
+
 Cada llamada a una tool MCP pide aprobación (**Permitir una vez** o **Permitir siempre**), salvo que actives **Autoaprobar MCP** en el chat. Activa sólo servidores de confianza: se ejecutan con tus permisos. Las plantillas usan la última versión del paquete; puedes fijar una versión en los argumentos (`paquete@1.2.3`). Las variables de entorno se guardan sin cifrar en la configuración de VS Code.
 
 Ejemplo de configuración:
@@ -145,7 +169,7 @@ Ejemplo de configuración:
 
 ### Configuración
 
-Todas las secciones son acordeones. Haz clic en el encabezado para abrir la que necesites.
+Todas las secciones son acordeones. Haz clic en el encabezado para abrir la que necesites; pasa el mouse sobre el título o sobre los íconos **?** para ver su explicación.
 
 #### Idioma
 
@@ -232,7 +256,7 @@ QAPI no incluye telemetría propia, publicidad, cuentas de usuario ni un backend
 | Historial, memoria editable, memoria automática, memoria holográfica y checkpoints | `workspaceState` local, separado por workspace |
 | Skills y agentes personalizados | Archivos del proyecto en `.qapi/` |
 
-Al enviar un mensaje, QAPI transmite al proveedor configurado el prompt y el contexto necesario. Antes, oculta los valores de contraseñas, tokens, claves privadas y credenciales en URLs; al escribir archivos los restaura, para no corromper credenciales de prueba. QAPI no lee ni envía archivos `.env`, `credentials*`, `secrets*`, claves (`.pem`, `.key`) ni el contenido de `.git`. Con Ollama, el procesamiento puede mantenerse local.
+Al enviar un mensaje, QAPI transmite al proveedor configurado el prompt y el contexto necesario. Antes, oculta los valores de contraseñas, tokens, claves privadas y credenciales en URLs; al escribir archivos los restaura, para no corromper credenciales de prueba. QAPI no lee ni envía archivos `.env`, `credentials*`, `secrets*`, claves (`.pem`, `.key`), estados de sesión del navegador (`storageState` de Playwright, `auth_sessions/`) ni el contenido de `.git`. Con Ollama, el procesamiento puede mantenerse local.
 
 Los servidores MCP son procesos externos a QAPI. Revisa su código, permisos y política de datos antes de habilitarlos.
 
@@ -328,4 +352,4 @@ Para reportar errores o proponer mejoras, utiliza [GitHub Issues](https://github
 
 QAPI es software de código abierto distribuido bajo la [Licencia MIT](LICENSE). Puedes usarlo, modificarlo y redistribuirlo de acuerdo con sus términos.
 
-Copyright © 2026 Felipe Farias Alfaro.
+Copyright © 2026 Felipe Farias Alfaro - CENTYC Chile.
