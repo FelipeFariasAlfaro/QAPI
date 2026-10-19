@@ -9,7 +9,8 @@ import { ChatTurn, Checkpoint, InvestigationMemory, Settings, UiTheme } from './
 import { MCP_TEMPLATE } from './mcp'
 import { redactSecrets } from './secretVault'
 
-const THEMES: UiTheme[] = ['dark', 'light', 'midnight', 'ocean', 'forest', 'sunset', 'mono', 'solarized']
+const THEMES: UiTheme[] = ['dark', 'light', 'midnight', 'ocean', 'forest', 'sunset', 'mono', 'solarized',
+  'nordic', 'dracula', 'retro', 'crimson', 'gold', 'oled', 'emerald', 'paper', 'mint', 'sky']
 export const FONT_SIZE_MIN = 9
 export const FONT_SIZE_MAX = 18
 const MAX_HISTORY_TURNS = 100
@@ -23,6 +24,8 @@ const KEY_HISTORY = 'qa-pi.history'
 const KEY_MEMORY = 'qa-pi.projectMemory'
 const KEY_INVESTIGATION_MEMORY = 'qa-pi.investigationMemory'
 const KEY_CHECKPOINTS = 'qa-pi.checkpoints'
+const KEY_DISABLED_AGENTS = 'qa-pi.disabledAgents'
+const MAX_DISABLED_AGENTS = 200
 const SECRET_PREFIX = 'qa-pi.apikey.'
 
 const DEFAULT_SETTINGS: Settings = {
@@ -36,6 +39,7 @@ const DEFAULT_SETTINGS: Settings = {
   verification: 'off',
   verificationCommand: '',
   mcpAutoApprove: false,
+  holographicMemory: true,
 }
 
 export class Store {
@@ -119,9 +123,27 @@ export class Store {
     return next
   }
 
+  /**
+   * Lectura-modificación-escritura atómica: el parche se calcula dentro de la
+   * cola de guardados, con los ajustes vigentes en ese momento. Calcularlo antes
+   * (getSettings + saveSettings) permitía que dos cambios rápidos se pisaran y
+   * se perdiera un servidor MCP recién activado.
+   */
+  private mutateSettings(build: (current: Settings) => Partial<Settings>): Promise<Settings> {
+    const run = async () => this.saveSettingsNow(build(await this.getSettings()))
+    const result = this.settingsMutation.then(run, run)
+    this.settingsMutation = result.catch(() => undefined)
+    return result
+  }
   async setMcpEnabled(name: string, enabled: boolean): Promise<Settings> {
-    const s = await this.getSettings()
-    return this.saveSettings({ mcpEnabled: { ...s.mcpEnabled, [name]: enabled } })
+    return this.mutateSettings((s) => ({ mcpEnabled: { ...s.mcpEnabled, [name]: enabled } }))
+  }
+  /** Guarda el JSON MCP y descarta de mcpEnabled los servidores que ya no existen. */
+  async saveMcpConfig(json: string, validNames: ReadonlySet<string>): Promise<Settings> {
+    return this.mutateSettings((s) => ({
+      mcpJson: json,
+      mcpEnabled: Object.fromEntries(Object.entries(s.mcpEnabled).filter(([name]) => validNames.has(name))),
+    }))
   }
 
   // Historial POR PROYECTO (workspaceState).
@@ -167,6 +189,40 @@ export class Store {
 
   async clearMemory(): Promise<void> {
     await this.ctx.workspaceState.update(KEY_MEMORY, '')
+  }
+
+  // Agentes desactivados: preferencia personal POR PROYECTO. No va en el archivo del
+  // agente porque los personalizados se comparten con el equipo en .qapi/agents y
+  // los incluidos con la extensión no son archivos.
+  getDisabledAgents(): string[] {
+    const saved = this.ctx.workspaceState.get<unknown>(KEY_DISABLED_AGENTS)
+    return Array.isArray(saved) ? saved.filter((slug): slug is string => typeof slug === 'string') : []
+  }
+
+  /**
+   * Lectura y escritura en el mismo turno del event loop (sin await en medio):
+   * el Memento actualiza su valor en memoria de forma síncrona, así que dos
+   * cambios seguidos no se pisan.
+   */
+  setAgentEnabled(slug: string, enabled: boolean): Promise<string[]> {
+    const disabled = new Set(this.getDisabledAgents())
+    if (enabled) disabled.delete(slug)
+    else disabled.add(slug)
+    const next = [...disabled].sort().slice(0, MAX_DISABLED_AGENTS)
+    return Promise.resolve(this.ctx.workspaceState.update(KEY_DISABLED_AGENTS, next)).then(() => next)
+  }
+
+  /** Al renombrar un agente, su estado de desactivación lo acompaña. */
+  async renameDisabledAgent(from: string, to: string): Promise<void> {
+    if (from === to) return
+    const disabled = this.getDisabledAgents()
+    if (!disabled.includes(from)) return
+    await this.setAgentEnabled(from, true)
+    await this.setAgentEnabled(to, false)
+  }
+
+  async clearDisabledAgents(): Promise<void> {
+    await this.ctx.workspaceState.update(KEY_DISABLED_AGENTS, [])
   }
 
   getInvestigationMemory(): InvestigationMemory {

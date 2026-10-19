@@ -17,6 +17,16 @@ export type UiTheme =
   | 'sunset'
   | 'mono'
   | 'solarized'
+  | 'nordic'
+  | 'dracula'
+  | 'retro'
+  | 'crimson'
+  | 'gold'
+  | 'oled'
+  | 'emerald'
+  | 'paper'
+  | 'mint'
+  | 'sky'
 
 export interface ProviderConfig {
   provider: ProviderId
@@ -58,6 +68,8 @@ export interface Settings {
   mcpEnabled: Record<string, boolean>
   /** Ejecuta las tools de los servidores MCP activos sin pedir confirmación en cada llamada. */
   mcpAutoApprove: boolean
+  /** Memoria holográfica: contexto compacto por fragmentos en lugar de extractos de archivo. */
+  holographicMemory: boolean
   theme: UiTheme
   fontSize: number
   configured: boolean
@@ -199,6 +211,29 @@ export interface HookDefinition {
   action: HookAction
 }
 
+/** Estado de la memoria holográfica para la pantalla de Configuración. */
+export interface HoloMemoryStats {
+  built: boolean
+  files: number
+  chunks: number
+  regions: number
+  relations: number
+  associations: number
+  notes: number
+  staleNotes: number
+  reinforced: number
+  approxMB: number
+}
+
+export interface HoloMemoryNote {
+  id: string
+  text: string
+  sources: { path: string }[]
+  stale: boolean
+  origin: 'agent' | 'user'
+  createdAt: number
+}
+
 export type CustomAgentOutputMode = 'chat' | 'file'
 /** "files": elige archivos del proyecto por glob. "freeText": pega texto o adjunta un archivo local. */
 export type CustomAgentInputMode = 'files' | 'freeText'
@@ -219,6 +254,11 @@ export interface CustomAgentDefinition {
   outputPathTemplate?: string
   /** true para los agentes incluidos con la extensión (no editables, sí duplicables). */
   builtIn?: boolean
+  /**
+   * Lo calcula el host según la preferencia del usuario en este proyecto; nunca se
+   * guarda en el archivo del agente. Ausente se interpreta como activo.
+   */
+  enabled?: boolean
 }
 
 /**
@@ -352,6 +392,10 @@ export type ToHost =
   | { type: 'refreshCustomAgents' }
   | { type: 'saveCustomAgent'; agent: CustomAgentDefinition; previousSlug?: string }
   | { type: 'deleteCustomAgent'; slug: string }
+  | { type: 'toggleCustomAgent'; slug: string; enabled: boolean }
+  | { type: 'getMemoryStats' }
+  | { type: 'forgetMemoryNote'; id: string }
+  | { type: 'rebuildMemory' }
   | { type: 'runCustomAgent'; slug: string; files: string[]; freeText?: string }
   | { type: 'suggestAgentFiles'; glob: string }
   | { type: 'openSpecDocument'; slug: string; kind: SpecDocumentKind }
@@ -428,4 +472,5 @@ export type ToWebview =
   | { type: 'specs'; specs: SpecSummary[] }
   | { type: 'contextRefSuggestions'; suggestions: string[] }
   | { type: 'customAgents'; agents: CustomAgentDefinition[] }
+  | { type: 'memoryStats'; stats: HoloMemoryStats; notes: HoloMemoryNote[] }
   | { type: 'agentFileSuggestions'; files: string[] }

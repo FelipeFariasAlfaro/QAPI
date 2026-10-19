@@ -4,11 +4,14 @@ import { ProjectIndex } from './projectIndex'
 import { QaPiViewProvider } from './panel'
 import { registerHooks } from './hooks'
 import { shutdownMcpPool } from './mcpRuntime'
+import { MemoryService } from './memory/service'
 
 export function activate(ctx: vscode.ExtensionContext) {
   const store = new Store(ctx)
   const index = new ProjectIndex()
-  const provider = new QaPiViewProvider(ctx, store, index)
+  const memory = new MemoryService(ctx)
+  ctx.subscriptions.push({ dispose: () => { void memory.flush() } })
+  const provider = new QaPiViewProvider(ctx, store, index, memory)
   let primaryRoot = vscode.workspace.workspaceFolders?.[0]?.uri.toString() || ''
 
   ctx.subscriptions.push(
@@ -20,7 +23,10 @@ export function activate(ctx: vscode.ExtensionContext) {
   // Índice del proyecto: construir al arrancar y mantener al día.
   const onStatus = (indexing: boolean, files: number) =>
     provider.post({ type: 'indexStatus', indexing, files })
-  void index.build(onStatus)
+  // La memoria holográfica se construye en segundo plano en cuanto termina el índice.
+  void index.build(onStatus).then(async () => {
+    if ((await store.getSettings()).holographicMemory !== false) memory.warm(index)
+  })
   ctx.subscriptions.push(
     index.watch(onStatus, (paths) => { void store.invalidateInvestigationMemory(paths) }),
     index,
@@ -52,6 +58,8 @@ export function activate(ctx: vscode.ExtensionContext) {
         await store.clearMemory()
         await store.clearInvestigationMemory()
         await store.clearCheckpoints()
+        await store.clearDisabledAgents()
+        await memory.reset()
         provider.post({ type: 'history', history: [], usage: { used: 0, limit: 0, ratio: 0, needsSummary: false } })
         provider.post({ type: 'memory', text: '', silent: true })
         provider.post({ type: 'checkpoints', checkpoints: [] })

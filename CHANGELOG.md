@@ -5,7 +5,27 @@ Todos los cambios relevantes de QAPI se documentan en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y el proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
 ## [Unreleased]
-
+## [1.2.0] - 2026-10-19
+### Añadido
+- **Memoria holográfica nativa** (activa por defecto, Configuración > Memoria holográfica): fragmenta el proyecto en funciones, escenarios, pasos y secciones, recupera por resonancia vectorial combinada con BM25 y un glosario bilingüe de QA, informa en cada mensaje qué cambió desde el anterior (también entre sesiones), guarda asociaciones holográficas reversibles (escenario → paso, prueba → código, uso de símbolos), refuerza lo que el agente usa y conserva notas con fuente que se marcan obsoletas al cambiar. Local, privada y sin dependencias ni servicios externos.
+- Herramientas `recall_memory`, `read_chunk` y `remember`, y `read_file` con `startLine`/`endLine` para leer sólo un rango.
+- Chip "memoria holográfica" en "Contexto usado".
+- Interruptor para activar o desactivar cada agente, también los integrados. Es una preferencia personal por proyecto que no modifica `.qapi/agents/`; el estado se conserva al renombrar un agente y el host rechaza ejecutar uno desactivado.
+- Diez temas visuales nuevos: Nórdico, Drácula, Retro, Carmesí, Dorado, Negro puro y Esmeralda (oscuros), y Papel, Menta y Cielo (claros).
+- Ayudas emergentes propias en toda la interfaz (al pasar el mouse o con el foco del teclado), con soporte de idioma y tema.
+### Cambiado
+- Con la memoria holográfica, el contexto de cada mensaje lleva referencias compactas y fragmentos en vez de extractos de archivos, y la referencia BDD completa sólo cuando se piden crear o modificar pruebas. En dos repositorios de prueba el contexto bajó de ~24.000 a ~9.000 caracteres por mensaje.
+- Rediseño de Skills, Agentes, MCP y Configuración: menos texto fijo y negritas, márgenes en los formularios, modos de activación como píldoras y explicaciones en ayudas emergentes. Las acciones de las tarjetas pasan a iconos.
+- Con servidores MCP activos, el agente usa sus tools en vez de improvisar comandos de shell equivalentes; si la petición o una skill menciona un servidor inactivo, pide activarlo.
+- El switch "Autoaprobar MCP" sigue visible mientras la autoaprobación esté encendida, aunque no haya servidores activos.
+### Corregido
+- Activar servidores MCP seguidos o guardar el JSON MCP mientras se activaba uno podía perder la activación.
+- Con algunos modelos (Gemini) la respuesta final podía ser sólo `[tools llamadas: …]`: el modelo copiaba el formato que QAPI usaba para registrar las llamadas. Ese registro ahora va en el mensaje de resultados y, si el modelo escribe una llamada como texto, se le pide una vez que la ejecute o responda.
+- Una pregunta informativa podía terminar con "No hay nada que cambiar en el repositorio" en lugar de la respuesta: frases como "te voy a explicar" activaban el aviso interno para emitir cambios. Ahora el aviso sólo se activa con verbos de escritura y, si no produce cambios, se entrega la respuesta original.
+- En el tema Claro, el texto de los bloques de código, la salida de comandos, el editor JSON y los comandos MCP era ilegible. Ahora usan su propio color de texto (`--qp-code-fg`).
+- El botón de peligro y el hover del botón primario conservan contraste suficiente con texto blanco en todos los temas.
+### Seguridad
+- Los estados de sesión del navegador (`storageState` de Playwright, `auth_sessions/`) ya no se indexan ni se entregan con `read_file`.
 ## [1.1.4] - 2026-09-17
 
 ### Añadido

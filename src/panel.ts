@@ -23,7 +23,11 @@ import {
 } from './skills'
 import { redactSecrets } from './secretVault'
 import { buildTaskContext, listSpecs, readSpec, slugifySpecName, updateTaskStatus } from './specs'
-import { buildRunInstruction, deleteCustomAgent, listCustomAgents, matchAgentFiles, saveCustomAgent } from './customAgents'
+import type { MemoryService } from './memory/service'
+import type { HolographicMemory } from './memory/memory'
+import {
+  buildRunInstruction, deleteCustomAgent, listCustomAgents, matchAgentFiles, saveCustomAgent, slugifyAgentName,
+} from './customAgents'
 import {
   AgentMode, ChatTurn, Checkpoint, ExecutionRun, FileProposal, Settings, SpecDocumentKind, SpecPhase, SpecSummary,
   SkillEvent, ToHost, TraceabilitySummary, UiLanguage,
@@ -48,6 +52,7 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
     private readonly ctx: vscode.ExtensionContext,
     private readonly store: Store,
     private readonly index: ProjectIndex,
+    private readonly memoryService?: MemoryService,
   ) {}
 
   reveal() { this.view?.show?.(true) }
@@ -102,6 +107,21 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
 
   private async postSettings(settings?: Settings) {
     this.post({ type: 'settings', settings: settings ? toPublicSettings(settings) : await this.store.getPublicSettings() })
+  }
+
+  private postMemoryStats() {
+    if (!this.memoryService) return
+    const notes = this.memoryService.notes().map((note) => ({
+      id: note.id, text: note.text, sources: note.sources.map((item) => ({ path: item.path })),
+      stale: note.stale, origin: note.origin, createdAt: note.createdAt,
+    }))
+    this.post({ type: 'memoryStats', stats: this.memoryService.stats(), notes })
+  }
+
+  /** Agentes disponibles con su estado de activación en este proyecto. */
+  private async agentsForWebview() {
+    const disabled = new Set(this.store.getDisabledAgents())
+    return (await listCustomAgents()).map((agent) => ({ ...agent, enabled: !disabled.has(agent.slug) }))
   }
 
   async clearChat() {
@@ -166,7 +186,7 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
     })
     await view.webview.postMessage({ type: 'indexStatus', indexing: this.index.indexing, files: this.index.fileCount })
     await view.webview.postMessage({ type: 'specs', specs: await listSpecs() })
-    await view.webview.postMessage({ type: 'customAgents', agents: await listCustomAgents() })
+    await view.webview.postMessage({ type: 'customAgents', agents: await this.agentsForWebview() })
     await this.postSkills()
 
     // La validación de ejecutables MCP puede tardar; nunca debe bloquear el primer render.
@@ -222,10 +242,8 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
           if (structure.error || structure.issues.length) {
             throw new Error(structure.error || 'Corrige la configuración MCP antes de guardarla.')
           }
-          const current = await this.store.getSettings()
           const valid = new Set(validation.servers.map((server) => server.name))
-          const enabled = Object.fromEntries(Object.entries(current.mcpEnabled).filter(([name]) => valid.has(name)))
-          const settings = await this.store.saveSettings({ mcpJson: message.json, mcpEnabled: enabled })
+          const settings = await this.store.saveMcpConfig(message.json, valid)
           await this.postSettings(settings)
           break
         }
@@ -402,19 +420,46 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
           break
         }
         case 'refreshCustomAgents':
-          this.post({ type: 'customAgents', agents: await listCustomAgents() })
+          this.post({ type: 'customAgents', agents: await this.agentsForWebview() })
           break
         case 'suggestAgentFiles':
           this.post({ type: 'agentFileSuggestions', files: matchAgentFiles(this.index, message.glob) })
           break
         case 'saveCustomAgent': {
-          await saveCustomAgent(message.agent, message.previousSlug)
-          this.post({ type: 'customAgents', agents: await listCustomAgents() })
+          const saved = await saveCustomAgent(message.agent, message.previousSlug)
+          // Si el agente cambió de nombre (y de slug), conserva su estado de activación.
+          if (message.previousSlug) await this.store.renameDisabledAgent(slugifyAgentName(message.previousSlug), saved.slug)
+          this.post({ type: 'customAgents', agents: await this.agentsForWebview() })
           break
         }
         case 'deleteCustomAgent': {
           await deleteCustomAgent(message.slug)
-          this.post({ type: 'customAgents', agents: await listCustomAgents() })
+          await this.store.setAgentEnabled(message.slug, true)
+          this.post({ type: 'customAgents', agents: await this.agentsForWebview() })
+          break
+        }
+        case 'getMemoryStats':
+          this.postMemoryStats()
+          break
+        case 'forgetMemoryNote':
+          this.memoryService?.forgetNote(message.id)
+          this.postMemoryStats()
+          break
+        case 'rebuildMemory': {
+          if (!this.memoryService) break
+          await this.memoryService.rebuild(this.index)
+          this.memoryService.persistSoon()
+          this.postMemoryStats()
+          const language = (await this.store.getSettings()).language || 'es'
+          this.post({ type: 'notice', message: ui(language, 'Memoria holográfica reconstruida.', 'Holographic memory rebuilt.') })
+          break
+        }
+        case 'toggleCustomAgent': {
+          const language = (await this.store.getSettings()).language || 'es'
+          const known = (await listCustomAgents()).some((item) => item.slug === message.slug)
+          if (!known) throw new Error(ui(language, 'El agente ya no está disponible.', 'The agent is no longer available.'))
+          await this.store.setAgentEnabled(message.slug, message.enabled === true)
+          this.post({ type: 'customAgents', agents: await this.agentsForWebview() })
           break
         }
         case 'runCustomAgent': {
@@ -422,6 +467,10 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
           const agents = await listCustomAgents()
           const agent = agents.find((item) => item.slug === message.slug)
           if (!agent) throw new Error(ui(language, 'El agente ya no está disponible.', 'The agent is no longer available.'))
+          // La interfaz ya oculta "Ejecutar", pero el host es quien decide (estado desactualizado, otra ventana).
+          if (this.store.getDisabledAgents().includes(agent.slug)) {
+            throw new Error(ui(language, 'El agente está desactivado. Actívalo para ejecutarlo.', 'The agent is disabled. Enable it to run it.'))
+          }
           const instruction = await buildRunInstruction(agent, this.index, message.files, message.freeText)
           await this.onSend(instruction, 'chat')
           break
@@ -515,6 +564,17 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
         })
       }
       const investigationMemory = this.store.getInvestigationMemory()
+      let holoMemory: HolographicMemory | undefined
+      if (settings.holographicMemory !== false && this.memoryService) {
+        if (!this.memoryService.isBuilt) this.post({ type: 'toolProgress', tool: 'memoria', detail: ui(language, 'construyendo la memoria holográfica', 'building the holographic memory') })
+        try {
+          holoMemory = await this.memoryService.ready(this.index)
+        } catch (error) {
+          // Si la memoria falla, el turno sigue con el contexto clásico.
+          console.error('QAPI: memoria holográfica no disponible', error)
+        }
+      }
+      assertWorkspaceRoot(requestRoot)
       let turn: ChatTurn
       try {
         turn = await ask(
@@ -531,9 +591,14 @@ export class QaPiViewProvider implements vscode.WebviewViewProvider {
           },
           signal,
           skills,
+          holoMemory,
         )
       } finally {
         await this.store.saveInvestigationMemory(investigationMemory)
+        if (holoMemory) {
+          this.memoryService?.persistSoon()
+          this.postMemoryStats()
+        }
       }
       if (signal.aborted) throw new Error(CANCELLED_ERROR)
       assertWorkspaceRoot(requestRoot)

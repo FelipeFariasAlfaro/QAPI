@@ -2,7 +2,7 @@
 
 QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en QA, testing y automatización. Analiza el workspace abierto, investiga con herramientas propias y prepara cambios de código, pruebas y comandos para que tú los revises y apruebes.
 
-- Versión actual: `1.1.4`
+- Versión actual: `1.2.0`
 - VS Code: `1.85.0` o superior
 - Licencia: [MIT](LICENSE)
 - Historial de cambios: [CHANGELOG.md](CHANGELOG.md)
@@ -21,10 +21,11 @@ QAPI es un agente de inteligencia artificial dentro de VS Code, especializado en
 - **Selector de modelo en el chat** y botón **Detener** para cancelar una respuesta en curso.
 - **Agentes personalizados** con instrucción fija, entrada por archivos o texto libre y salida al chat o a un archivo.
 - Diagnóstico de reportes, logs y traces; análisis de pruebas impactadas por el Git diff; trazabilidad estática entre requisitos, escenarios, steps y pruebas.
+- **Memoria holográfica nativa:** el agente conoce el estado del proyecto en cada mensaje (qué funciones, escenarios o archivos cambiaron) y recibe fragmentos pequeños en lugar de archivos completos, con menos tokens por mensaje.
 - Memoria editable por proyecto y memoria automática de investigación validada por hash.
 - Proveedores Gemini, Claude, OpenAI y Ollama local.
 - Privacidad: sin telemetría, API keys en `SecretStorage` y redacción de secretos antes de enviar contexto al modelo.
-- Interfaz en español o inglés, ocho temas visuales y tamaño de fuente ajustable.
+- Interfaz en español o inglés, 18 temas visuales y tamaño de fuente ajustable.
 
 ## Instalación
 
@@ -93,6 +94,8 @@ Los comandos tienen un tiempo máximo; al alcanzarlo o al pulsar **Detener**, QA
 ### Agentes
 
 Presets con una instrucción fija para tareas repetibles. Cada agente toma como entrada archivos del proyecto (filtrados por un glob) o texto libre y un archivo adjunto, y entrega el resultado en el chat o en un archivo. Incluye agentes para documentación de negocio y generación de casos de prueba en Gherkin. Se guardan en `.qapi/agents/` para compartirlos con el equipo.
+
+Cada agente, incluidos los integrados, tiene un interruptor para activarlo o desactivarlo. Un agente desactivado sigue visible pero atenuado y no se puede ejecutar. Es una preferencia personal por proyecto: no se escribe en el archivo del agente, así que no genera cambios en Git ni afecta a tu equipo.
 
 ### Skills
 
@@ -171,6 +174,20 @@ El **comando de verificación** lo defines tú y admite marcadores:
 
 Ejemplos: `behave {tests}`, `pytest {tests}`, `npx playwright test {tests}`. Sin marcadores, el comando se ejecuta tal cual; evita suites completas en proyectos grandes. **Sugerir para este proyecto** propone una plantilla según el framework detectado, que sólo se usa si la guardas. La verificación sólo funciona en workspaces confiables.
 
+#### Memoria holográfica
+
+Activa por defecto. QAPI divide el proyecto en fragmentos con significado propio (funciones, clases, métodos, escenarios Gherkin, definiciones de pasos y secciones Markdown) y mantiene una memoria distribuida local, sin modelos ni servicios externos:
+
+- **Recuperación por resonancia:** cada fragmento tiene un vector de contenido; la consulta se compara con todos y el resultado se combina con el BM25 del índice. Un glosario bilingüe de QA hace que "inicio de sesión" encuentre `login` o "captura de pantalla" encuentre `screenshot`.
+- **Estado del proyecto:** en cada mensaje sincroniza sólo los archivos cuyo hash cambió y le dice al agente qué funciones, escenarios o archivos se añadieron, modificaron o borraron desde el mensaje anterior, incluso entre sesiones.
+- **Asociaciones holográficas:** cada fragmento guarda en un único vector sus relaciones (escenario → definición del paso, prueba → código, uso de símbolos importados). Se recuperan desuniendo y limpiando con un umbral de ruido; las actualizaciones son exactas y reversibles.
+- **Plasticidad:** los fragmentos que el agente lee se refuerzan y quedan asociados entre sí; el refuerzo decae con el tiempo.
+- **Notas aprendidas:** con la herramienta `remember` el agente guarda notas breves con los archivos que las respaldan. Si esos archivos cambian, la nota se marca como posiblemente obsoleta. Se ven y se borran en esta sección.
+
+En lugar de extractos de archivo, el contexto lleva referencias de una línea (`[id] ruta:líneas · firma`) y el contenido de los fragmentos más relevantes. El agente lee más con `read_chunk(id)` o `read_file` con `startLine`/`endLine`. En preguntas que no escriben pruebas, la referencia BDD se reduce a las convenciones y a los pasos más relacionados; al pedir crear o modificar pruebas se incluye completa.
+
+La memoria vive en el almacenamiento privado del proyecto en VS Code: no escribe en el repositorio ni en `.qapi/`. Excluye `.env`, credenciales, claves y estados de sesión del navegador (`storageState`, `auth_sessions/`). Al apagarla, QAPI vuelve al contexto clásico.
+
 #### Memoria del proyecto
 
 Guarda convenciones, objetivos, decisiones y reglas del workspace, que se añaden al contexto de conversaciones futuras (hasta 12.000 caracteres).
@@ -187,7 +204,7 @@ Relaciona IDs o tags de requisito (por ejemplo `@ABC-123` o `REQ-12`), escenario
 
 #### Apariencia
 
-Ocho temas visuales (Oscuro, Claro, Medianoche, Océano, Bosque, Atardecer, Monocromo y Solarizado) y tamaño de fuente entre 9 px y 18 px. Los bloques de código usan un fondo casi negro en todos los temas.
+18 temas visuales (Oscuro, Claro, Medianoche, Océano, Bosque, Atardecer, Monocromo, Solarizado, Nórdico, Drácula, Retro, Carmesí, Dorado, Negro puro, Esmeralda, Papel, Menta y Cielo) y tamaño de fuente entre 9 px y 18 px. Los bloques de código usan un fondo casi negro en todos los temas.
 
 ### Sobre Centyc
 
@@ -212,7 +229,7 @@ QAPI no incluye telemetría propia, publicidad, cuentas de usuario ni un backend
 | --- | --- |
 | API keys | `SecretStorage` de VS Code, protegido por el sistema operativo. Nunca se envían a la interfaz |
 | Proveedor, modelo, idioma, apariencia, verificación y MCP | `globalState` local de VS Code |
-| Historial, memoria editable, memoria automática y checkpoints | `workspaceState` local, separado por workspace |
+| Historial, memoria editable, memoria automática, memoria holográfica y checkpoints | `workspaceState` local, separado por workspace |
 | Skills y agentes personalizados | Archivos del proyecto en `.qapi/` |
 
 Al enviar un mensaje, QAPI transmite al proveedor configurado el prompt y el contexto necesario. Antes, oculta los valores de contraseñas, tokens, claves privadas y credenciales en URLs; al escribir archivos los restaura, para no corromper credenciales de prueba. QAPI no lee ni envía archivos `.env`, `credentials*`, `secrets*`, claves (`.pem`, `.key`) ni el contenido de `.git`. Con Ollama, el procesamiento puede mantenerse local.
@@ -245,6 +262,7 @@ QAPI utiliza TypeScript y dos bundles independientes construidos con esbuild:
 | `src/skills.ts` | Formato, almacenamiento y selección de skills |
 | `src/secretVault.ts` | Redacción reversible de secretos |
 | `src/projectIndex.ts` | Índice léxico incremental, búsqueda, steps y convenciones Gherkin |
+| `src/memory/` | Memoria holográfica: codificador bilingüe, fragmentador, primitivas HDC, asociaciones, notas y servicio de persistencia |
 | `src/investigationMemory.ts` | Caché automática de investigaciones validada por hash |
 | `src/projectProfile.ts` | Detección de stack, frameworks y manifiestos |
 | `src/ideContext.ts` | Archivo activo, selección, Problems, Git, artefactos e impacto |

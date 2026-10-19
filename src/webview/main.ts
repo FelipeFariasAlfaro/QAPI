@@ -31,6 +31,16 @@ const THEME_OPTIONS: [UiTheme, string][] = [
   ['sunset', 'Atardecer'],
   ['mono', 'Monocromo'],
   ['solarized', 'Solarizado'],
+  ['nordic', 'Nórdico'],
+  ['dracula', 'Drácula'],
+  ['retro', 'Retro'],
+  ['crimson', 'Carmesí'],
+  ['gold', 'Dorado'],
+  ['oled', 'Negro puro'],
+  ['emerald', 'Esmeralda'],
+  ['paper', 'Papel'],
+  ['mint', 'Menta'],
+  ['sky', 'Cielo'],
 ]
 const THEME_CLASSES = THEME_OPTIONS.map(([value]) => `theme-${value}`)
 
@@ -269,6 +279,11 @@ window.addEventListener('message', (ev) => {
         customAgents = msg.agents
         render()
         break
+      case 'memoryStats':
+        holoStats = msg
+        // Cada turno actualiza las estadísticas: sólo se repinta si se están viendo.
+        if (tab === 'settings') render()
+        break
       case 'agentFileSuggestions':
         agentFileSuggestions = msg.files
         render()
@@ -324,6 +339,8 @@ function applyTheme() {
 // ── Render ──────────────────────────────────────────────────────────────────
 
 function render() {
+  // El DOM se reconstruye: un tooltip abierto quedaría huérfano sin su elemento.
+  hideTooltip()
   // render() reconstruye el DOM: se conserva el foco y la selección del campo
   // activo (p. ej. el compositor) para poder escribir mientras llega una respuesta.
   const active = document.activeElement as (HTMLInputElement | HTMLTextAreaElement | null)
@@ -413,6 +430,7 @@ function renderInner() {
       : tab === 'settings' ? settingsView()
       : centycView(),
   )
+  upgradeTitles(root)
   localizeUi(root)
   saveLocalState()
 }
@@ -628,9 +646,14 @@ function modelPicker(busy: boolean): HTMLElement {
   return select
 }
 
-/** Switch de autoaprobación MCP; sólo aparece si hay algún servidor activo. */
+/**
+ * Switch de autoaprobación MCP. Aparece si hay algún servidor activo y también
+ * mientras la autoaprobación siga encendida: si se ocultara, no habría forma de
+ * apagarla desde el chat y se aplicaría en silencio al activar el próximo servidor.
+ */
 function mcpAutoApproveSwitch(): HTMLElement | undefined {
-  if (!Object.values(settings!.mcpEnabled).some(Boolean)) return undefined
+  const anyEnabled = Object.values(settings!.mcpEnabled).some(Boolean)
+  if (!anyEnabled && !settings!.mcpAutoApprove) return undefined
   const label = document.createElement('label')
   label.className = 'toggle'
   label.title = tr(
@@ -716,20 +739,14 @@ function agentsView(): HTMLElement {
     return view
   }
 
-  const header = div('agents-header')
-  const title = document.createElement('p')
-  title.className = 'hint'
-  title.textContent = tr(
-    'Presets con instrucción fija y archivos de entrada. Ejecútalos con un clic o crea los tuyos.',
-    'Presets with a fixed instruction and input files. Run them with one click or create your own.',
-  )
-  header.appendChild(title)
-  header.appendChild(button(tr('+ Crear agente', '+ Create agent'), 'btn btn-primary btn-sm', () => {
+  view.appendChild(viewHeader(tr('Agentes', 'Agents'), tr(
+    'Presets con instrucción fija y archivos de entrada. Ejecútalos con un clic o crea los tuyos. Desactiva con el interruptor los que no uses en este proyecto.',
+    'Presets with a fixed instruction and input files. Run them with one click or create your own. Use the switch to turn off the ones you do not need in this project.',
+  ), button(tr('+ Crear agente', '+ Create agent'), 'btn btn-primary btn-sm', () => {
     editingAgent = { slug: '', name: '', description: '', instructions: '', outputMode: 'chat' }
     editingAgentPreviousSlug = undefined
     render()
-  }))
-  view.appendChild(header)
+  })))
 
   const list = div('agents-grid')
   if (!customAgents.length) {
@@ -749,7 +766,9 @@ function agentsView(): HTMLElement {
 }
 
 function agentCard(agent: CustomAgentDefinition): HTMLElement {
-  const card = div('agent-card')
+  // Ausente se interpreta como activo (mensajes de versiones anteriores del host).
+  const enabled = agent.enabled !== false
+  const card = div(`agent-card ${enabled ? '' : 'agent-disabled'}`)
   const header = div('agent-card-header')
   const icon = div('agent-icon')
   icon.textContent = agent.icon || '🤖'
@@ -769,11 +788,29 @@ function agentCard(agent: CustomAgentDefinition): HTMLElement {
     }))
     header.appendChild(actions)
   }
+
+  // Interruptor de activación: aplica a todos los agentes, incluidos los integrados.
+  const toggleLabel = withTip(document.createElement('label'), enabled
+    ? tr('Activo: puedes ejecutarlo.', 'Enabled: you can run it.')
+    : tr('Desactivado: no se puede ejecutar.', 'Disabled: it cannot be run.'))
+  toggleLabel.className = 'toggle'
+  const toggle = document.createElement('input')
+  toggle.type = 'checkbox'
+  toggle.checked = enabled
+  toggle.setAttribute('role', 'switch')
+  toggle.setAttribute('aria-label', tr(`Activar ${agent.name}`, `Enable ${agent.name}`))
+  toggle.onchange = () => post({ type: 'toggleCustomAgent', slug: agent.slug, enabled: toggle.checked })
+  toggleLabel.appendChild(toggle)
+  header.appendChild(toggleLabel)
   card.appendChild(header)
 
   const description = div('agent-description')
   description.textContent = agent.description || tr('Sin descripción.', 'No description.')
+  // La tarjeta recorta a dos líneas; el texto completo aparece al pasar el mouse.
+  if (agent.description && agent.description.length > 100) withTip(description, agent.description)
   card.appendChild(description)
+  // Desactivado: sin selector de archivos, texto ni "Ejecutar". Los borradores se conservan en memoria.
+  if (!enabled) return card
 
   const isFilesMode = (agent.inputMode || 'files') === 'files' && agent.inputGlob
   const isFreeTextMode = agent.inputMode === 'freeText'
@@ -1903,6 +1940,7 @@ function settingsView(): HTMLElement {
   }
   cMemory.appendChild(memoryActions)
   view.appendChild(cMemory)
+  view.appendChild(holoMemoryCard(currentSettings))
 
   view.appendChild(specsCard())
 
@@ -1994,6 +2032,102 @@ function settingsView(): HTMLElement {
   return view
 }
 
+// ── Memoria holográfica ─────────────────────────────────────────────────────
+
+let holoStats: Extract<ToWebview, { type: 'memoryStats' }> | null = null
+let holoStatsRequested = false
+
+function holoMemoryCard(currentSettings: Settings): HTMLElement {
+  const box = card(
+    tr('Memoria holográfica', 'Holographic memory'),
+    tr(
+      'Mantiene el estado del proyecto al día y envía al modelo fragmentos pequeños (funciones, escenarios) en lugar de archivos completos. Es local y privada: no se escribe en el repositorio.',
+      'Keeps the project state up to date and sends the model small fragments (functions, scenarios) instead of whole files. Local and private: nothing is written to the repository.',
+    ),
+  )
+  if (!holoStatsRequested) {
+    holoStatsRequested = true
+    post({ type: 'getMemoryStats' })
+  }
+  const enabled = currentSettings.holographicMemory !== false
+  const toggle = withTip(document.createElement('label'), tr(
+    'Apagada, QAPI vuelve al contexto clásico: extractos de archivo por BM25.',
+    'When off, QAPI goes back to the classic context: BM25 file excerpts.',
+  ))
+  toggle.className = 'toggle'
+  const input = document.createElement('input')
+  input.type = 'checkbox'
+  input.checked = enabled
+  input.setAttribute('role', 'switch')
+  input.onchange = () => {
+    if (!settings) return
+    settings = { ...settings, holographicMemory: input.checked }
+    post({ type: 'saveSettings', settings: { holographicMemory: input.checked } })
+    render()
+  }
+  const label = document.createElement('span')
+  label.textContent = tr('Usar memoria holográfica', 'Use holographic memory')
+  toggle.append(label, input)
+  box.appendChild(toggle)
+
+  const stats = holoStats?.stats
+  const summary = div('hint')
+  summary.textContent = !stats
+    ? tr('Cargando…', 'Loading…')
+    : stats.built
+      ? tr(
+        `${stats.files} archivos · ${stats.chunks} fragmentos · ${stats.relations} relaciones · ${stats.reinforced} reforzados · ~${stats.approxMB} MB`,
+        `${stats.files} files · ${stats.chunks} fragments · ${stats.relations} relations · ${stats.reinforced} reinforced · ~${stats.approxMB} MB`,
+      )
+      : tr('Se construye al abrir el proyecto o con el primer mensaje.', 'Built when the project opens or with the first message.')
+  box.appendChild(summary)
+
+  const notes = holoStats?.notes || []
+  const notesLabel = div('section-label')
+  notesLabel.textContent = tr(`Notas aprendidas (${notes.length})`, `Learned notes (${notes.length})`)
+  notesLabel.appendChild(infoTip(tr(
+    'El agente guarda notas con la herramienta remember, siempre con los archivos que las respaldan. Si esos archivos cambian, la nota se marca como posiblemente obsoleta.',
+    'The agent saves notes with the remember tool, always with the files that back them. If those files change, the note is marked as possibly stale.',
+  )))
+  box.appendChild(notesLabel)
+  if (!notes.length) {
+    const empty = div('hint')
+    empty.textContent = tr('Aún no hay notas.', 'No notes yet.')
+    box.appendChild(empty)
+  }
+  for (const note of notes) {
+    const row = div('checkpoint-item')
+    const info = div('checkpoint-info')
+    const text = div('checkpoint-label')
+    text.textContent = note.text
+    withTip(text, note.text)
+    const meta = div('checkpoint-meta')
+    meta.textContent = `${note.stale ? tr('posiblemente obsoleta · ', 'possibly stale · ') : ''}${note.sources.map((item) => item.path).join(', ') || tr('sin fuente', 'no source')}`
+    info.append(text, meta)
+    const remove = iconBtn(tr('Olvidar nota', 'Forget note'), '✕', () => {
+      if (!confirmOnce(`note:${note.id}`)) {
+        toast(tr('Pulsa otra vez para olvidar la nota.', 'Click again to forget the note.'))
+        return
+      }
+      post({ type: 'forgetMemoryNote', id: note.id })
+    })
+    remove.classList.add('mcp-delete')
+    row.append(info, remove)
+    box.appendChild(row)
+  }
+
+  const actions = div('row')
+  const rebuild = button(tr('Reconstruir', 'Rebuild'), 'btn btn-ghost btn-sm', () => {
+    post({ type: 'rebuildMemory' })
+    toast(tr('Reconstruyendo la memoria…', 'Rebuilding the memory…'))
+  })
+  withTip(rebuild, tr('Vuelve a procesar todos los archivos. Conserva notas y refuerzos.', 'Reprocesses every file. Keeps notes and reinforcements.'))
+  rebuild.disabled = !enabled
+  actions.appendChild(rebuild)
+  box.appendChild(actions)
+  return box
+}
+
 // ── Skills ──────────────────────────────────────────────────────────────────
 
 let skillsState: { skills: SkillDefinition[]; templates: SkillDefinition[]; detected: string[]; trusted: boolean } | null = null
@@ -2070,16 +2204,17 @@ function skillsView(): HTMLElement {
     return view
   }
 
-  const intro = div('mcp-intro')
-  const title = document.createElement('h3')
-  title.textContent = 'Skills'
-  const description = div('hint')
-  description.textContent = tr(
+  // Sin workspace confiable no se pueden crear skills: el botón no se ofrece.
+  const createButton = skillsState.trusted
+    ? button(tr('+ Crear skill', '+ Create skill'), 'btn btn-primary btn-sm', () => {
+      skillForm = { slug: '', name: '', description: '', activation: 'auto', instructions: '', enabled: true, events: [], frameworks: [] }
+      render()
+    })
+    : undefined
+  view.appendChild(viewHeader('Skills', tr(
     'Instrucciones reutilizables que el agente aplica cuando corresponde: analizar fallos, cómo escribir localizadores, convenciones del equipo. Se guardan en .qapi/skills para compartirlas con tu equipo.',
     'Reusable instructions the agent applies when relevant: analyzing failures, how to write locators, team conventions. Saved in .qapi/skills so your team can share them.',
-  )
-  intro.append(title, description)
-  view.appendChild(intro)
+  ), createButton))
 
   if (!skillsState.trusted) {
     const warning = div('status-warn')
@@ -2090,13 +2225,6 @@ function skillsView(): HTMLElement {
     view.appendChild(warning)
     return view
   }
-
-  const toolbar = div('row mcp-toolbar')
-  toolbar.appendChild(button(tr('+ Crear skill', '+ Create skill'), 'btn btn-primary btn-sm', () => {
-    skillForm = { slug: '', name: '', description: '', activation: 'auto', instructions: '', enabled: true, events: [], frameworks: [] }
-    render()
-  }))
-  view.appendChild(toolbar)
 
   const list = div('mcp-list')
   if (!skillsState.skills.length) {
@@ -2116,6 +2244,8 @@ function skillsView(): HTMLElement {
     const grid = div('mcp-presets')
     for (const template of templates) {
       const item = div('mcp-preset')
+      // La descripción de la plantilla se ve al pasar el mouse por la tarjeta.
+      if (template.description) withTip(item, template.description)
       const head = div('mcp-preset-head')
       const name = document.createElement('strong')
       name.textContent = template.name
@@ -2124,11 +2254,9 @@ function skillsView(): HTMLElement {
         skillForm = { ...template, events: [...(template.events || [])], frameworks: [...(template.frameworks || [])] }
         render()
       }))
-      const text = div('hint')
-      text.textContent = template.description
       const mode = div('skill-badge')
       mode.textContent = activationLabel(template)
-      item.append(head, text, mode)
+      item.append(head, mode)
       grid.appendChild(item)
     }
     view.appendChild(grid)
@@ -2142,7 +2270,27 @@ function skillCard(skill: SkillDefinition): HTMLElement {
   const title = div('mcp-card-title')
   title.textContent = skill.name
   header.appendChild(title)
-  const toggleLabel = document.createElement('label')
+
+  // Acciones como iconos con tooltip: una sola fila en vez de tres botones con texto.
+  header.appendChild(iconBtn(tr('Editar', 'Edit'), '✎', () => {
+    skillForm = { ...skill, events: [...(skill.events || [])], frameworks: [...(skill.frameworks || [])], previousSlug: skill.slug }
+    render()
+  }))
+  header.appendChild(iconBtn(tr('Abrir el archivo .md', 'Open the .md file'), '↗', () => post({ type: 'openSkillFile', slug: skill.slug })))
+  const remove = iconBtn(tr('Eliminar', 'Delete'), '✕', () => {
+    if (!confirmOnce(`skill-delete:${skill.slug}`)) {
+      toast(tr(`Pulsa Eliminar otra vez para borrar “${skill.name}”.`, `Click Delete again to remove “${skill.name}”.`))
+      return
+    }
+    post({ type: 'deleteSkill', slug: skill.slug })
+    toast(tr('Skill eliminada', 'Skill removed'))
+  })
+  remove.classList.add('mcp-delete')
+  header.appendChild(remove)
+
+  const toggleLabel = withTip(document.createElement('label'), skill.enabled
+    ? tr('Activa: se aplica según su modo.', 'Enabled: applies according to its mode.')
+    : tr('Inactiva: no se aplica.', 'Disabled: not applied.'))
   toggleLabel.className = 'toggle'
   const toggle = document.createElement('input')
   toggle.type = 'checkbox'
@@ -2150,15 +2298,15 @@ function skillCard(skill: SkillDefinition): HTMLElement {
   toggle.setAttribute('role', 'switch')
   toggle.setAttribute('aria-label', tr(`Activar ${skill.name}`, `Enable ${skill.name}`))
   toggle.onchange = () => post({ type: 'toggleSkill', slug: skill.slug, enabled: toggle.checked })
-  const toggleText = document.createElement('span')
-  toggleText.textContent = skill.enabled ? tr('Activa', 'Enabled') : tr('Inactiva', 'Disabled')
-  toggleLabel.append(toggleText, toggle)
+  toggleLabel.appendChild(toggle)
   header.appendChild(toggleLabel)
   card.appendChild(header)
 
   if (skill.description) {
-    const description = div('hint')
+    const description = div('hint clamp-2')
     description.textContent = skill.description
+    // El tooltip sólo aporta cuando el texto puede quedar recortado.
+    if (skill.description.length > 110) withTip(description, skill.description)
     card.appendChild(description)
   }
   const badges = div('skill-badges')
@@ -2182,53 +2330,42 @@ function skillCard(skill: SkillDefinition): HTMLElement {
     badges.appendChild(usage)
   }
   card.appendChild(badges)
-
-  const actions = div('row mcp-card-actions')
-  actions.appendChild(button(tr('Editar', 'Edit'), 'btn btn-ghost btn-sm', () => {
-    skillForm = { ...skill, events: [...(skill.events || [])], frameworks: [...(skill.frameworks || [])], previousSlug: skill.slug }
-    render()
-  }))
-  actions.appendChild(button(tr('Abrir .md', 'Open .md'), 'btn btn-ghost btn-sm', () => post({ type: 'openSkillFile', slug: skill.slug })))
-  actions.appendChild(button(tr('Eliminar', 'Delete'), 'btn btn-ghost btn-sm mcp-delete', () => {
-    if (!confirmOnce(`skill-delete:${skill.slug}`)) {
-      toast(tr(`Pulsa Eliminar otra vez para borrar “${skill.name}”.`, `Click Delete again to remove “${skill.name}”.`))
-      return
-    }
-    post({ type: 'deleteSkill', slug: skill.slug })
-    toast(tr('Skill eliminada', 'Skill removed'))
-  }))
-  card.appendChild(actions)
   return card
 }
 
 function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLElement {
   const box = div('card mcp-form skill-form')
   const title = document.createElement('h3')
+  title.className = 'form-title'
   title.textContent = form.previousSlug ? tr(`Editar ${form.name}`, `Edit ${form.name}`) : tr('Nueva skill', 'New skill')
   box.appendChild(title)
 
+  // Nombre y descripción comparten fila; en paneles angostos se apilan solos.
   const nameInput = inputEl('text', form.name, (value) => { form.name = value })
   nameInput.id = 'skill-form-name'
   nameInput.placeholder = tr('Análisis de fallos', 'Failure analysis')
-  box.appendChild(field(tr('Nombre', 'Name'), nameInput))
-
   const descriptionInput = inputEl('text', form.description, (value) => { form.description = value })
   descriptionInput.id = 'skill-form-description'
   descriptionInput.placeholder = tr('Cuándo debe usarse y para qué', 'When it should be used and what for')
-  box.appendChild(field(tr('Descripción', 'Description'), descriptionInput))
-  if (form.activation === 'auto') {
-    const hint = div('hint')
-    hint.textContent = tr(
+  const identity = div('field-row')
+  identity.append(
+    field(tr('Nombre', 'Name'), nameInput),
+    field(tr('Descripción', 'Description'), descriptionInput, tr(
       'En modo automático el agente decide por esta descripción: explica claramente cuándo aplica.',
       'In automatic mode the agent decides from this description: explain clearly when it applies.',
-    )
-    box.appendChild(hint)
-  }
+    )),
+  )
+  box.appendChild(identity)
 
-  // Activación como opciones visuales en vez de un select.
+  // Activación como píldoras: la explicación de cada modo vive en su tooltip.
+  const activationBox = div('field')
   const activationLabelEl = div('section-label')
   activationLabelEl.textContent = tr('¿Cuándo se usa?', 'When is it used?')
-  box.appendChild(activationLabelEl)
+  activationLabelEl.appendChild(infoTip(tr(
+    'Elige cuándo aplica el agente esta skill. Pasa el mouse sobre cada opción para ver qué hace.',
+    'Choose when the agent applies this skill. Hover each option to see what it does.',
+  )))
+  activationBox.appendChild(activationLabelEl)
   const options = div('skill-options')
   options.setAttribute('role', 'radiogroup')
   for (const option of SKILL_ACTIVATIONS) {
@@ -2237,11 +2374,8 @@ function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLE
     item.className = `skill-option ${form.activation === option.value ? 'selected' : ''}`
     item.setAttribute('role', 'radio')
     item.setAttribute('aria-checked', String(form.activation === option.value))
-    const label = document.createElement('strong')
-    label.textContent = tr(option.label, option.labelEn)
-    const help = div('hint')
-    help.textContent = tr(option.help, option.helpEn)
-    item.append(label, help)
+    item.textContent = tr(option.label, option.labelEn)
+    withTip(item, tr(option.help, option.helpEn))
     item.onclick = () => {
       form.activation = option.value
       if (option.value === 'event' && !form.events?.length) form.events = ['testResult']
@@ -2249,15 +2383,16 @@ function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLE
     }
     options.appendChild(item)
   }
-  box.appendChild(options)
+  activationBox.appendChild(options)
+  box.appendChild(activationBox)
 
   if (form.activation === 'event') {
+    const eventsBox = div('field')
     const eventsLabel = div('section-label')
     eventsLabel.textContent = tr('Eventos', 'Events')
-    box.appendChild(eventsLabel)
+    eventsBox.appendChild(eventsLabel)
+    const eventList = div('skill-events')
     for (const event of SKILL_EVENTS) {
-      const row = document.createElement('label')
-      row.className = 'check-label skill-event'
       const input = checkbox(Boolean(form.events?.includes(event.value)), () => {
         const next = new Set(form.events || [])
         if (input.checked) next.add(event.value)
@@ -2265,15 +2400,13 @@ function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLE
         form.events = [...next]
         render()
       })
-      const text = div('')
-      const strong = document.createElement('strong')
-      strong.textContent = tr(event.label, event.labelEn)
-      const help = div('hint')
-      help.textContent = tr(event.help, event.helpEn)
-      text.append(strong, help)
-      row.append(input, text)
-      box.appendChild(row)
+      // El "?" va fuera del label para que pulsarlo no marque la casilla.
+      const item = div('skill-event')
+      item.append(labeledControl(input, tr(event.label, event.labelEn)), infoTip(tr(event.help, event.helpEn)))
+      eventList.appendChild(item)
     }
+    eventsBox.appendChild(eventList)
+    box.appendChild(eventsBox)
   }
 
   if (form.activation === 'fileMatch' || (form.activation === 'event' && form.events?.includes('beforeWrite'))) {
@@ -2281,24 +2414,27 @@ function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLE
     patternInput.id = 'skill-form-pattern'
     patternInput.placeholder = '**/pages/**'
     patternInput.spellcheck = false
-    const optional = form.activation === 'event' ? tr(' (opcional: vacío = todos los archivos)', ' (optional: empty = all files)') : ''
-    box.appendChild(field(`${tr('Patrón de archivos', 'File pattern')}${optional}`, patternInput))
+    const patternHelp = form.activation === 'event'
+      ? tr('Archivos a los que aplica, p. ej. **/pages/**. Opcional: vacío = todos los archivos.', 'Files it applies to, e.g. **/pages/**. Optional: empty = all files.')
+      : tr('Archivos a los que aplica, p. ej. **/pages/**.', 'Files it applies to, e.g. **/pages/**.')
+    const patternBox = div('field')
+    patternBox.appendChild(field(tr('Patrón de archivos', 'File pattern'), patternInput, patternHelp))
     const chips = div('skill-chips')
     for (const example of GLOB_EXAMPLES) {
       chips.appendChild(button(example, 'skill-chip', () => { form.fileMatchPattern = example; render() }))
     }
-    box.appendChild(chips)
+    patternBox.appendChild(chips)
+    box.appendChild(patternBox)
   }
 
+  const scopeBox = div('field')
   const scopeLabel = div('section-label')
   scopeLabel.textContent = tr('Sólo en proyectos con… (opcional)', 'Only in projects with… (optional)')
-  box.appendChild(scopeLabel)
-  const scopeHint = div('hint')
-  scopeHint.textContent = tr(
-    'Sin selección, aplica en cualquier proyecto. Resaltados: los detectados en este proyecto.',
-    'With nothing selected it applies to any project. Highlighted: detected in this project.',
-  )
-  box.appendChild(scopeHint)
+  scopeLabel.appendChild(infoTip(tr(
+    'Sin selección, aplica en cualquier proyecto. Los de borde punteado están detectados en este proyecto.',
+    'With nothing selected it applies to any project. Dashed-border items are detected in this project.',
+  )))
+  scopeBox.appendChild(scopeLabel)
   const detected = new Set(skillsState?.detected || [])
   const known = [...new Set([...KNOWN_FRAMEWORKS, ...detected, ...(form.frameworks || [])])]
   const scopeChips = div('skill-chips')
@@ -2312,21 +2448,28 @@ function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLE
       render()
     })
     chip.setAttribute('aria-pressed', String(selected))
+    if (detected.has(framework)) withTip(chip, tr('Detectado en este proyecto', 'Detected in this project'))
     scopeChips.appendChild(chip)
   }
-  box.appendChild(scopeChips)
+  scopeBox.appendChild(scopeChips)
+  box.appendChild(scopeBox)
 
   const instructions = document.createElement('textarea')
   instructions.id = 'skill-form-instructions'
   instructions.className = 'skill-instructions'
   instructions.value = form.instructions
   instructions.placeholder = tr(
-    'Escribe las instrucciones como se las darías a un compañero. Ej.: "Al crear localizadores usa XPath relativos y prioriza @data-testid".',
-    'Write the instructions as you would to a teammate. E.g.: "When creating locators use relative XPath and prefer @data-testid".',
+    'Escribe las instrucciones como se las darías a un compañero.',
+    'Write the instructions as you would to a teammate.',
   )
   instructions.oninput = () => { form.instructions = instructions.value }
-  box.appendChild(field(tr('Instrucciones', 'Instructions'), instructions))
+  box.appendChild(field(tr('Instrucciones', 'Instructions'), instructions, tr(
+    'Ej.: "Al crear localizadores usa XPath relativos y prioriza @data-testid".',
+    'E.g.: "When creating locators use relative XPath and prefer @data-testid".',
+  )))
 
+  // Pie: estado a la izquierda, acciones a la derecha.
+  const footer = div('skill-form-footer')
   const enabledRow = document.createElement('label')
   enabledRow.className = 'toggle'
   const enabledInput = document.createElement('input')
@@ -2337,10 +2480,8 @@ function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLE
   const enabledText = document.createElement('span')
   enabledText.textContent = tr('Activa', 'Enabled')
   enabledRow.append(enabledText, enabledInput)
-  box.appendChild(enabledRow)
-
-  const actions = div('row skill-form-actions')
-  actions.appendChild(button(tr('Guardar skill', 'Save skill'), 'btn btn-primary btn-sm', () => {
+  footer.appendChild(enabledRow)
+  footer.appendChild(button(tr('Guardar skill', 'Save skill'), 'btn btn-primary btn-sm', () => {
     if (!form.name.trim() || !form.instructions.trim()) {
       toast(tr('El nombre y las instrucciones son obligatorios.', 'Name and instructions are required.'))
       return
@@ -2359,8 +2500,8 @@ function skillFormView(form: SkillDefinition & { previousSlug?: string }): HTMLE
     toast(tr('Skill guardada', 'Skill saved'))
     render()
   }))
-  actions.appendChild(button(tr('Cancelar', 'Cancel'), 'btn btn-ghost btn-sm', () => { skillForm = null; render() }))
-  box.appendChild(actions)
+  footer.appendChild(button(tr('Cancelar', 'Cancel'), 'btn btn-ghost btn-sm', () => { skillForm = null; render() }))
+  box.appendChild(footer)
   return box
 }
 
@@ -2439,21 +2580,17 @@ function mcpView(): HTMLElement {
   const currentSettings = settings!
   const config = readMcpConfig()
 
-  const intro = div('mcp-intro')
-  const title = document.createElement('h3')
-  title.textContent = tr('Servidores MCP', 'MCP servers')
-  const description = div('hint')
-  description.textContent = tr(
+  view.appendChild(viewHeader(tr('Servidores MCP', 'MCP servers'), tr(
     'Conecta herramientas externas al agente. Un servidor activo se inicia al usarlo en el chat y sus tools piden tu aprobación en cada llamada.',
     'Connect external tools to the agent. An enabled server starts when the chat uses it, and each tool call asks for your approval.',
-  )
-  const warning = div('status-warn')
-  warning.textContent = tr(
-    'Activa sólo servidores confiables: se ejecutan con tus permisos y pueden acceder a datos.',
-    'Enable only trusted servers: they run with your permissions and can access data.',
-  )
-  intro.append(title, description, warning)
-  view.appendChild(intro)
+  )))
+  // La advertencia de seguridad se conserva visible, pero en una línea; el detalle va en el tooltip.
+  const warning = withTip(div('status-warn'), tr(
+    'Los servidores se ejecutan con tus permisos y pueden acceder a datos. Activa sólo los que sean confiables.',
+    'Servers run with your permissions and can access data. Enable only the ones you trust.',
+  ))
+  warning.textContent = tr('Activa sólo servidores confiables.', 'Enable only trusted servers.')
+  view.appendChild(warning)
 
   if (config.error && !mcpShowJson) {
     const error = div('status-err')
@@ -2497,10 +2634,14 @@ function mcpView(): HTMLElement {
   if (presets.length) {
     const label = div('section-label')
     label.textContent = tr('Plantillas', 'Templates')
+    label.appendChild(infoTip(tr(
+      'Las plantillas descargan la última versión del paquete con npx/uvx. Para fijar una versión, edita los argumentos (p. ej. paquete@1.2.3).',
+      'Templates download the latest package version with npx/uvx. To pin a version, edit the arguments (e.g. package@1.2.3).',
+    )))
     view.appendChild(label)
     const grid = div('mcp-presets')
     for (const preset of presets) {
-      const item = div('mcp-preset')
+      const item = withTip(div('mcp-preset'), tr(preset.description, mcpPresetDescriptionEn(preset.name)))
       const head = div('mcp-preset-head')
       const name = document.createElement('strong')
       name.textContent = preset.label
@@ -2509,20 +2650,12 @@ function mcpView(): HTMLElement {
         mcpForm = { name: preset.name, command: preset.command, args: preset.args.join('\n'), env: '' }
         render()
       }))
-      const text = div('hint')
-      text.textContent = tr(preset.description, mcpPresetDescriptionEn(preset.name))
       const command = document.createElement('code')
       command.textContent = `${preset.command} ${preset.args.join(' ')}`
-      item.append(head, text, command)
+      item.append(head, command)
       grid.appendChild(item)
     }
     view.appendChild(grid)
-    const note = div('hint')
-    note.textContent = tr(
-      'Las plantillas descargan la última versión del paquete con npx/uvx. Para fijar una versión, edita los argumentos (p. ej. paquete@1.2.3).',
-      'Templates download the latest package version with npx/uvx. To pin a version, edit the arguments (e.g. package@1.2.3).',
-    )
-    view.appendChild(note)
   }
   return view
 }
@@ -2708,13 +2841,11 @@ function mcpFormView(form: McpFormState, config: ReturnType<typeof readMcpConfig
   envInput.value = form.env
   envInput.placeholder = 'API_KEY=…'
   envInput.oninput = () => { form.env = envInput.value }
-  box.appendChild(field(tr('Variables de entorno (CLAVE=valor, una por línea)', 'Environment variables (KEY=value, one per line)'), envInput))
-  const envNote = div('hint')
-  envNote.textContent = tr(
+  // La advertencia de cifrado viaja con el campo, que es donde se escriben los secretos.
+  box.appendChild(field(tr('Variables de entorno (CLAVE=valor, una por línea)', 'Environment variables (KEY=value, one per line)'), envInput, tr(
     'Estas variables se guardan en la configuración de VS Code sin cifrar. Para secretos, prefiere variables ya definidas en tu sistema.',
     'These variables are stored unencrypted in the VS Code settings. For secrets, prefer variables already defined in your system.',
-  )
-  box.appendChild(envNote)
+  )))
 
   const actions = div('row')
   actions.appendChild(button(tr('Guardar servidor', 'Save server'), 'btn btn-primary btn-sm', () => {
@@ -2954,6 +3085,16 @@ const UI_EN = new Map<string, string>([
   ['Atardecer', 'Sunset'],
   ['Monocromo', 'Monochrome'],
   ['Solarizado', 'Solarized'],
+  ['Nórdico', 'Nordic'],
+  ['Drácula', 'Dracula'],
+  ['Retro', 'Retro'],
+  ['Carmesí', 'Crimson'],
+  ['Dorado', 'Gold'],
+  ['Negro puro', 'Pure black'],
+  ['Esmeralda', 'Emerald'],
+  ['Papel', 'Paper'],
+  ['Menta', 'Mint'],
+  ['Cielo', 'Sky'],
   ['Tema', 'Theme'],
   ['Key guardada · escribe una nueva para reemplazarla', 'Key saved · type a new one to replace it'],
   ['Pega tu API key (si ya hay una guardada, déjalo vacío)', 'Paste your API key (leave empty to keep a saved one)'],
@@ -3058,6 +3199,9 @@ function localizeUi(container: HTMLElement) {
   for (const element of Array.from(container.querySelectorAll<HTMLElement>('[title]'))) {
     element.title = translateUiText(element.title)
   }
+  for (const element of Array.from(container.querySelectorAll<HTMLElement>('[data-tip]'))) {
+    element.dataset.tip = translateUiText(element.dataset.tip || '')
+  }
   for (const element of Array.from(container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[placeholder]'))) {
     element.placeholder = translateUiText(element.placeholder)
   }
@@ -3079,7 +3223,8 @@ function button(label: string, cls: string, onClick: () => void): HTMLButtonElem
 }
 function iconBtn(title: string, label: string, onClick: () => void): HTMLButtonElement {
   const element = button(label, 'icon-btn', onClick)
-  element.title = title
+  element.dataset.tip = title
+  element.setAttribute('aria-label', title)
   return element
 }
 function linkBtn(label: string, onClick: () => void): HTMLButtonElement { return button(label, 'link-btn', onClick) }
@@ -3114,19 +3259,18 @@ function card(titleText: string, hint: string): HTMLDetailsElement {
   const heading = div('setting-heading')
   const title = document.createElement('h3')
   title.textContent = titleText
-  const description = document.createElement('p')
-  description.className = 'hint'
-  description.textContent = hint
   heading.appendChild(title)
-  heading.appendChild(description)
   summary.appendChild(heading)
+  // La descripción ya no ocupa una línea por acordeón: aparece al pasar el mouse.
+  if (hint) withTip(summary, hint)
   element.appendChild(summary)
   return element
 }
-function field(labelText: string, control: HTMLElement): HTMLElement {
+function field(labelText: string, control: HTMLElement, help?: string): HTMLElement {
   const element = div('field')
   const label = document.createElement('label')
   label.textContent = labelText
+  if (help) label.appendChild(infoTip(help))
   element.appendChild(label)
   element.appendChild(control)
   return element
@@ -3145,6 +3289,94 @@ function toast(text: string) {
   setTimeout(() => element.remove(), 2600)
 }
 
+// ── Ayudas emergentes ───────────────────────────────────────────────────────
+// Reemplazan a los textos explicativos fijos y al atributo title (lento y sin
+// estilo): aparecen al instante con el mouse o el foco del teclado, respetan el
+// tema y se reubican para no salirse del panel.
+
+/** Asocia una ayuda emergente a un elemento y la expone como descripción accesible. */
+function withTip<T extends HTMLElement>(element: T, text: string): T {
+  element.dataset.tip = text
+  element.setAttribute('aria-description', text)
+  return element
+}
+/** Marca "?" enfocable cuyo texto sólo se ve al pasar el mouse o enfocarla. */
+function infoTip(text: string): HTMLSpanElement {
+  const element = document.createElement('span')
+  element.className = 'info-tip'
+  element.textContent = '?'
+  element.tabIndex = 0
+  element.setAttribute('role', 'img')
+  element.setAttribute('aria-label', text)
+  element.dataset.tip = text
+  return element
+}
+/** Encabezado de pestaña: título, ayuda emergente y acción principal alineada a la derecha. */
+function viewHeader(titleText: string, helpText: string, action?: HTMLElement): HTMLElement {
+  const header = div('view-header')
+  const heading = document.createElement('h3')
+  heading.textContent = titleText
+  header.append(heading, infoTip(helpText), div('spacer'))
+  if (action) header.appendChild(action)
+  return header
+}
+/** Convierte los title nativos en ayudas propias. Los controles deshabilitados no emiten eventos de mouse: conservan el nativo. */
+function upgradeTitles(container: HTMLElement) {
+  for (const element of Array.from(container.querySelectorAll<HTMLElement>('[title]'))) {
+    if ((element as HTMLButtonElement).disabled || !element.title) continue
+    element.dataset.tip = element.title
+    if (!element.textContent?.trim() && !element.getAttribute('aria-label')) element.setAttribute('aria-label', element.title)
+    element.removeAttribute('title')
+  }
+}
+let tooltipEl: HTMLDivElement | null = null
+let tooltipTarget: HTMLElement | null = null
+function showTooltip(target: HTMLElement, pointer?: { x: number; y: number }) {
+  const text = target.dataset.tip
+  if (!text) { hideTooltip(); return }
+  if (!tooltipEl) {
+    tooltipEl = div('tooltip')
+    tooltipEl.setAttribute('role', 'tooltip')
+    document.body.appendChild(tooltipEl)
+  }
+  tooltipTarget = target
+  tooltipEl.textContent = text
+  const anchor = target.getBoundingClientRect()
+  const box = tooltipEl.getBoundingClientRect()
+  const margin = 8
+  // Con mouse sigue al puntero (útil en filas anchas); con teclado se ancla al elemento.
+  const centerX = pointer ? pointer.x : anchor.left + anchor.width / 2
+  const left = Math.max(margin, Math.min(centerX - box.width / 2, window.innerWidth - box.width - margin))
+  let top = pointer ? pointer.y + 18 : anchor.bottom + 6
+  if (top + box.height > window.innerHeight - margin) {
+    top = Math.max(margin, (pointer ? pointer.y - 12 : anchor.top - 6) - box.height)
+  }
+  tooltipEl.style.left = `${left}px`
+  tooltipEl.style.top = `${top}px`
+  tooltipEl.classList.add('visible')
+}
+function hideTooltip() {
+  tooltipTarget = null
+  tooltipEl?.classList.remove('visible')
+}
+function tooltipOwner(node: EventTarget | null): HTMLElement | null {
+  return node instanceof Element ? node.closest<HTMLElement>('[data-tip]') : null
+}
+document.addEventListener('mouseover', (event) => {
+  const owner = tooltipOwner(event.target)
+  if (owner === tooltipTarget) return
+  if (owner) showTooltip(owner, { x: event.clientX, y: event.clientY })
+  else hideTooltip()
+})
+document.addEventListener('mouseout', (event) => { if (!event.relatedTarget) hideTooltip() })
+document.addEventListener('focusin', (event) => {
+  const owner = tooltipOwner(event.target)
+  if (owner) showTooltip(owner)
+})
+document.addEventListener('focusout', hideTooltip)
+document.addEventListener('mousedown', hideTooltip)
+document.addEventListener('scroll', hideTooltip, true)
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') hideTooltip() })
 function announceReady() { post({ type: 'ready' }) }
 
 window.addEventListener('pageshow', announceReady)

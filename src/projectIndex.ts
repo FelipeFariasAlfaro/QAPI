@@ -10,6 +10,7 @@ import { createHash } from 'crypto'
 import { open, realpath, stat } from 'fs/promises'
 import * as nodePath from 'path'
 import { detectProfile, ProjectProfile } from './projectProfile'
+import { isPrivatePath, looksLikeBrowserSession } from './memory/memory'
 
 interface Doc {
   path: string
@@ -98,13 +99,17 @@ export class ProjectIndex {
     const uri = vscode.Uri.joinPath(root, norm)
     if (!await isRealPathInside(root, uri)) return undefined
     const openDocument = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri.toString())
-    if (openDocument && !openDocument.isClosed) return openDocument.getText().slice(0, maxChars)
-    try {
-      return await readTextPrefix(uri.fsPath, maxChars)
-    } catch {
-      const doc = this.docs.find((item) => item.path === norm)
-      return doc?.text.slice(0, maxChars)
+    let text: string | undefined
+    if (openDocument && !openDocument.isClosed) text = openDocument.getText().slice(0, maxChars)
+    else {
+      try {
+        text = await readTextPrefix(uri.fsPath, maxChars)
+      } catch {
+        text = this.docs.find((item) => item.path === norm)?.text.slice(0, maxChars)
+      }
     }
+    // Un storageState de Playwright tiene cookies de sesión: no se entrega al modelo.
+    return text !== undefined && looksLikeBrowserSession(norm, text) ? undefined : text
   }
 
   /** Lista rutas que empiecen por un prefijo (para explorar el árbol). */
@@ -425,6 +430,8 @@ async function readDoc(uri: vscode.Uri, rel: string): Promise<Doc | undefined> {
     const bytes = await vscode.workspace.fs.readFile(uri)
     if (looksBinary(bytes)) return undefined
     const text = Buffer.from(bytes).toString('utf8')
+    // storageState con otro nombre de archivo: se reconoce por su contenido.
+    if (looksLikeBrowserSession(rel, text)) return undefined
     return makeDoc(rel, text, hashText(text))
   } catch {
     return undefined
@@ -490,8 +497,15 @@ function isIndexablePath(path: string): boolean {
     && !path.split('/').some((part) => EXCLUDED_PATH_SEGMENTS.has(part))
 }
 
-/** Nunca se indexan ni se leen credenciales locales ni la configuración de Git. */
+/**
+ * Nunca se indexan ni se leen credenciales locales, la configuración de Git ni
+ * estados de sesión del navegador (storageState de Playwright con cookies).
+ */
 function isSensitivePath(path: string): boolean {
+  return isPrivatePath(path) || isLegacySensitivePath(path)
+}
+
+function isLegacySensitivePath(path: string): boolean {
   return /(?:^|\/)\.git(?:\/|$)/.test(path)
     || /(?:^|\/)\.env(?:\.[^/]*)?$/.test(path)
     || /(?:^|\/)(?:id_rsa|id_ed25519|id_ecdsa)(?:\.pub)?$/.test(path)

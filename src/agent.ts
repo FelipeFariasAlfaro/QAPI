@@ -11,6 +11,7 @@ import { applyExactEdit, hydrateProposals } from './changes'
 import { analyzeTestImpact, discoverArtifacts, formatIdeContext, readArtifact } from './ideContext'
 import { createCommandProposal } from './execution'
 import { openMcpRuntime } from './mcpRuntime'
+import { parseMcpConfig } from './mcp'
 import { buildTraceability, formatTraceability } from './traceability'
 import { contextLimitFor } from './contextWindow'
 import {
@@ -20,10 +21,53 @@ import { SteeringSelection } from './steering'
 import { investigateCodebase, reviewProposals, SubAgentContext } from './subAgent'
 import { ResolvedContextRefs } from './contextRefs'
 import { flatten, listSpecs, readSpecDocument, updateTaskStatus, writeSpecDocument } from './specs'
+import type { HolographicMemory } from './memory/memory'
 import {
   AgentMode, ChatTurn, CommandProposal, FileProposal, IdeContextSnapshot, InvestigationMemory, Settings,
   SkillDefinition, SpecDocumentKind, SpecTask, UiLanguage,
 } from './types'
+
+/**
+ * Indicaciones sobre MCP para el modelo.
+ *
+ * Sin ellas, ante una petición como “enséñale a GLIA…” o una skill que dice
+ * “consulta al MCP de glia”, un modelo que no ve tools MCP improvisa un comando
+ * de shell equivalente (p. ej. `python -m glia learn`) que además suele fallar.
+ * - Con servidores activos: se le pide usar sus tools y no inventar un CLI.
+ * - Con un servidor configurado pero inactivo que la petición o una skill
+ *   mencionan: se le pide avisar al usuario que lo active, en vez de improvisar.
+ * @param active Tools MCP disponibles en este turno.
+ * @param configured Nombres de todos los servidores del JSON guardado.
+ * @param enabled Estado de activación por servidor.
+ * @param hint Texto donde buscar menciones (petición + catálogo de skills).
+ */
+export function buildMcpGuidance(
+  active: ReadonlyArray<{ serverName: string }>,
+  configured: readonly string[],
+  enabled: Readonly<Record<string, boolean>>,
+  hint: string,
+): string {
+  const blocks: string[] = []
+  if (active.length) {
+    const counts = new Map<string, number>()
+    for (const tool of active) counts.set(tool.serverName, (counts.get(tool.serverName) || 0) + 1)
+    const servers = [...counts].map(([name, count]) => `${name} (${count} tools)`).join(', ')
+    blocks.push(
+      `SERVIDORES MCP ACTIVOS: ${servers}. Para lo que ofrece cada servidor usa directamente sus tools MCP. ` +
+      'No propongas comandos de shell ni de CLI (por ejemplo `python -m <servidor>`) para hacer lo que una tool MCP ya hace.',
+    )
+  }
+  const haystack = hint.toLowerCase()
+  const mentionedInactive = configured.filter((name) => enabled[name] !== true && name.trim() && haystack.includes(name.toLowerCase()))
+  if (mentionedInactive.length) {
+    blocks.push(
+      `SERVIDORES MCP CONFIGURADOS PERO INACTIVOS: ${mentionedInactive.join(', ')}. La petición o una skill los menciona, ` +
+      'pero sus tools no están disponibles en este turno. No los reemplaces con comandos de shell ni inventes su CLI: ' +
+      'explica brevemente que deben activarse en la pestaña MCP (interruptor “Activo”) y termina sin proponer comandos.',
+    )
+  }
+  return blocks.join('\n\n')
+}
 
 const SYSTEM_BASE = `Eres QAPI, asistente experto en QA y automatización de pruebas
 integrado en VS Code. Trabajas sobre el proyecto abierto, cualquiera sea su stack.
@@ -173,6 +217,42 @@ const LOAD_SKILL_TOOL: ToolDef = {
   },
 }
 
+/** Herramientas de la memoria holográfica: sólo se ofrecen si está activa. */
+const MEMORY_TOOLS: ToolDef[] = [
+  {
+    name: 'recall_memory',
+    description: 'Consulta la memoria holográfica del proyecto. Devuelve fragmentos relevantes (id, ruta, líneas, firma), fragmentos asociados por estructura o uso y notas aprendidas. Úsala antes de leer archivos completos.',
+    parameters: { type: 'object', properties: { query: { type: 'string', description: 'Qué buscas, en lenguaje natural o con nombres de código' } }, required: ['query'] },
+  },
+  {
+    name: 'read_chunk',
+    description: 'Lee un fragmento completo de la memoria por su id ([k…]): una función, clase, escenario o sección. Mucho más barato que read_file.',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+  {
+    name: 'remember',
+    description: 'Guarda una nota breve y verificada sobre el proyecto (convención, decisión, dónde está algo) con los archivos que la respaldan. Si esos archivos cambian, la nota se marca como posiblemente obsoleta. No guardes secretos ni datos personales.',
+    parameters: {
+      type: 'object',
+      properties: {
+        note: { type: 'string', description: 'Una o dos frases' },
+        sources: { type: 'array', items: { type: 'string' }, description: 'Rutas relativas que respaldan la nota' },
+      },
+      required: ['note'],
+    },
+  },
+]
+const MEMORY_TOOL_NAMES = new Set(MEMORY_TOOLS.map((tool) => tool.name))
+
+/** Contexto que aporta la memoria holográfica a un mensaje. */
+export interface HoloContext {
+  section: string
+  /** true cuando la petición puede escribir: se incluye la referencia BDD completa. */
+  fullBdd: boolean
+  steps: { pattern: string; path: string }[]
+  stepTotal: number
+}
+
 const READ_TOOLS: ToolDef[] = [
   {
     name: 'list_specs', description: 'Lista los specs del proyecto con su fase y progreso de tareas.',
@@ -191,8 +271,17 @@ const READ_TOOLS: ToolDef[] = [
     parameters: { type: 'object', properties: { prefix: { type: 'string' } } },
   },
   {
-    name: 'read_file', description: 'Lee un archivo del proyecto por ruta relativa.',
-    parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    name: 'read_file',
+    description: 'Lee un archivo del proyecto por ruta relativa. Con startLine/endLine (1-based, inclusivos) lee sólo ese rango: úsalo cuando ya sabes qué parte necesitas.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        startLine: { type: 'number', description: 'Primera línea (opcional)' },
+        endLine: { type: 'number', description: 'Última línea (opcional)' },
+      },
+      required: ['path'],
+    },
   },
   {
     name: 'search_code', description: 'Busca texto literal (sin distinguir mayúsculas) en el proyecto. Para una expresión regular usa la forma /patrón/.',
@@ -237,6 +326,7 @@ export function buildMessages(
   investigationContext = '',
   steeringContext = '',
   explicitContext = '',
+  holo?: HoloContext,
 ): ChatMessage[] {
   const profile = index.profile
   const parts: string[] = [`PROYECTO: ${index.projectName}`]
@@ -244,16 +334,24 @@ export function buildMessages(
   if (explicitContext.trim()) parts.push(redactForModel(explicitContext))
   if (steeringContext.trim()) parts.push(redactForModel(steeringContext))
   if (memory.trim()) parts.push(`MEMORIA EDITABLE DEL PROYECTO (reglas del usuario):\n${redactForModel(memory).slice(0, 12_000)}`)
+  // La memoria holográfica va antes del contexto del editor: el recorte final por
+  // presupuesto corta el final, y antes cortaba justo los fragmentos relevantes.
+  if (holo?.section) parts.push(redactForModel(holo.section))
   if (investigationContext.trim()) parts.push(investigationContext)
   parts.push(`MAPA DEL REPOSITORIO:\n${index.repoMap()}`)
   if (ideContext) parts.push(formatIdeContext(ideContext))
 
-  if (profile?.usesBdd) addBddContext(parts, index)
-  const hits = index.retrieve(instruction, 6)
-  if (hits.length) {
-    parts.push('FRAGMENTOS RELEVANTES:\n' + hits.map((hit) =>
-      `— ${hit.path}\n\`\`\`\n${redactForModel(hit.excerpt)}\n\`\`\``,
-    ).join('\n\n'))
+  if (profile?.usesBdd) {
+    if (!holo || holo.fullBdd) addBddContext(parts, index)
+    else addCompactBddContext(parts, index, holo)
+  }
+  if (!holo) {
+    const hits = index.retrieve(instruction, 6)
+    if (hits.length) {
+      parts.push('FRAGMENTOS RELEVANTES:\n' + hits.map((hit) =>
+        `— ${hit.path}\n\`\`\`\n${redactForModel(hit.excerpt)}\n\`\`\``,
+      ).join('\n\n'))
+    }
   }
 
   let rules = `${SYSTEM_BASE}\n\n${languageRule(language)}\n\n${profile ? (profile.usesBdd ? SYSTEM_BDD : SYSTEM_CODE) : ''}`
@@ -315,6 +413,25 @@ function addBddContext(parts: string[], index: ProjectIndex) {
   if (sample) parts.push(`STEPS DE REFERENCIA (${sample.path}):\n\`\`\`\n${redactForModel(sample.excerpt)}\n\`\`\``)
 }
 
+/**
+ * Versión compacta para peticiones que no escriben: conserva las convenciones
+ * obligatorias y lista sólo los pasos más parecidos a la petición. Los ejemplos
+ * completos de features y de steps se omiten (la memoria los recupera si hacen falta).
+ */
+function addCompactBddContext(parts: string[], index: ProjectIndex, holo: HoloContext) {
+  const conventions = index.gherkinConventions()
+  const header = conventions.featureCount === 0
+    ? 'Sin referencia: no añadas # language por defecto.'
+    : conventions.usesLanguageHeader
+      ? `Usa # language${conventions.languageCode ? `: ${conventions.languageCode}` : ''}.`
+      : `NO uses # language (${conventions.languageHeaderCount}/${conventions.featureCount} lo usan).`
+  parts.push(`CONVENCIONES GHERKIN OBLIGATORIAS:\n- ${header}\n- Keywords: ${conventions.predominantKeywords}.\n- El idioma del usuario no cambia el dialecto.`)
+  if (holo.steps.length) {
+    parts.push(`STEPS EXISTENTES (${holo.stepTotal} en total; estos son los más relacionados con la petición, usa recall_memory para buscar otros):\n` +
+      holo.steps.map((step) => `- ${step.pattern} (${step.path})`).join('\n'))
+  }
+}
+
 interface MutationAuthorization {
   allowed: boolean
   social: boolean
@@ -348,6 +465,20 @@ function authorizeMutation(instruction: string, history: ChatTurn[], mode: Agent
   return { allowed: true, social: false }
 }
 
+/**
+ * ¿La petición va a escribir pruebas BDD? En ese caso el contexto lleva la
+ * referencia completa (todos los pasos, features y steps de ejemplo) para no
+ * inventar pasos. authorizeMutation autoriza por defecto casi cualquier
+ * petición, así que no sirve para decidir esto.
+ */
+export function wantsBddAuthoring(instruction: string, history: ChatTurn[]): boolean {
+  const normalized = normalizeIntent(instruction)
+  const confirmation = /^(?:si|yes|ok|okay|dale|hazlo|do it|go ahead|adelante|procede+|proceed|continua|aplica(?: todo)?)(?: por favor| please)?$/.test(normalized)
+  if (confirmation) return Boolean(previousAssistantTurn(history, instruction))
+  const verb = /\b(?:crea|crear|creame|genera|generar|escribe|escribir|redacta|redactar|agrega|agregar|anade|anadir|implementa|implementar|completa|completar|modifica|modificar|actualiza|actualizar|corrige|corregir|refactoriza|create|write|generate|add|implement|update|fix|refactor|automatiza|automatizar|automate)\b/
+  const noun = /\b(?:escenarios?|scenarios?|features?|caracteristicas?|steps?|pasos?|gherkin|pruebas?|tests?|casos?|cases?|bdd)\b|\.feature\b/
+  return verb.test(normalized) && noun.test(normalized)
+}
 function previousAssistantTurn(history: ChatTurn[], instruction: string): ChatTurn | undefined {
   let end = history.length
   const last = history[end - 1]
@@ -367,11 +498,17 @@ function announcesPendingAction(text: string): boolean {
   if (!normalized) return false
   // Sólo formas que anuncian una acción propia e inminente. Verbos sueltos como
   // "agrega" o "crea" aparecen en respuestas informativas ("puedes agregar…").
+  // "Voy a" o "let me" solos no bastan: "te voy a explicar" o "let me explain"
+  // son respuestas informativas. Deben ir seguidos de un verbo de escritura.
+  const writeEs = '(?:crear|generar|escribir|preparar|implementar|agregar|anadir|actualizar|modificar|editar|corregir|cambiar|refactorizar|eliminar|borrar)'
+  const writeEn = '(?:create|generate|write|prepare|implement|add|update|modify|edit|fix|change|refactor|delete|remove)'
   const future = [
-    'voy a', 'vamos a', 'procedo a', 'procedo con', 'procedere a', 'a continuacion (?:creo|crear|genero|escribo|preparo|implemento|agrego|anado|actualizo)',
+    `voy a ${writeEs}`, `vamos a ${writeEs}`, `procedo a ${writeEs}`, `procedere a ${writeEs}`,
+    'a continuacion (?:creo|crear|genero|escribo|preparo|implemento|agrego|anado|actualizo)',
     'ahora (?:creo|creare|genero|generare|escribo|escribire|preparo|preparare|implemento|agrego|anado|actualizo|modifico)',
     'creare', 'generare', 'escribire', 'preparare', 'implementare', 'anadire', 'agregare', 'actualizare', 'modificare',
-    'let me', 'i will', 'i ll', 'i am going to', 'i m going to', 'now i (?:will|ll)', 'next i (?:will|ll)',
+    `let me ${writeEn}`, `i will ${writeEn}`, `i ll ${writeEn}`, `i am going to ${writeEn}`, `i m going to ${writeEn}`,
+    `now i (?:will|ll) ${writeEn}`, `next i (?:will|ll) ${writeEn}`,
   ].join('|')
   return new RegExp(`\\b(?:${future})\\b`).test(normalized)
 }
@@ -410,6 +547,7 @@ export async function ask(
   onStream?: (text: string) => void,
   signal?: AbortSignal,
   skills: SkillSelection = EMPTY_SKILLS,
+  holoMemory?: HolographicMemory,
 ): Promise<ChatTurn> {
   const modelLimit = settings.provider.contextLimit || contextLimitFor(settings.provider.provider, settings.provider.model)
   const contextBudgetChars = Math.max(12_000, Math.min(60_000, Math.floor(modelLimit * 4 * 0.5)))
@@ -435,10 +573,26 @@ export async function ask(
   }
   const requestRoot = currentWorkspaceRoot()
   const automaticMemory = investigationMemory || { version: 1, generation: 0, indexFingerprint: '', files: [], queries: [] }
-  const recall = recallInvestigationMemory(index, automaticMemory, instruction, history)
+  // Memoria holográfica: estado del proyecto al día y fragmentos pequeños en lugar
+  // de archivos completos. Reemplaza a los extractos BM25 y a la memoria de lecturas.
+  let holo: HoloContext | undefined
+  if (holoMemory) {
+    holoMemory.sync(index)
+    const changes = holoMemory.changesSinceSeen()
+    const sectionBudget = Math.max(3_000, Math.min(8_000, Math.floor(contextBudgetChars * 0.2)))
+    holo = {
+      section: holoMemory.contextFor(instruction, index, sectionBudget, changes),
+      fullBdd: mutationAuthorization.allowed && wantsBddAuthoring(instruction, history),
+      steps: holoMemory.relevantSteps(instruction, 25),
+      stepTotal: holoMemory.stepCount(),
+    }
+    holoMemory.markSeen()
+  }
+  const usedChunks = new Set<string>()
+  const recall = holo ? { text: '', paths: [] as string[] } : recallInvestigationMemory(index, automaticMemory, instruction, history)
   const messages = buildMessages(
     instruction, history, index, ideContext, memory, mode, contextBudgetChars, language, recall.text,
-    [steering?.text, skills.text].filter(Boolean).join('\n\n'), explicitContext?.text || '',
+    [steering?.text, skills.text].filter(Boolean).join('\n\n'), explicitContext?.text || '', holo,
   )
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
   const mcp = root && mode === 'chat' && !mutationAuthorization.social
@@ -451,10 +605,28 @@ export async function ask(
     ? [WRITE_FILE_TOOL, EDIT_FILE_TOOL, COMMAND_TOOL, SPEC_DOCUMENT_TOOL, SPEC_TASK_TOOL]
     : []
   const availableMcpTools = mcp.tools
+  const mcpGuidance = mode === 'chat' && !mutationAuthorization.social
+    ? buildMcpGuidance(
+      availableMcpTools,
+      parseMcpConfig(settings.mcpJson).servers.map((server) => server.name),
+      settings.mcpEnabled,
+      `${instruction}\n${skills.text}`,
+    )
+    : ''
+  if (mcpGuidance) messages.push({ role: 'system', content: mcpGuidance })
+  if (holo) {
+    messages.push({
+      role: 'system',
+      content: language === 'en'
+        ? 'MEMORY: to investigate, use recall_memory first (it understands paraphrases and both languages) and read_chunk to read a fragment. Use search_code only for exact strings (an identifier, a literal message) and read_file with startLine/endLine when you need a specific range.'
+        : 'MEMORIA: para investigar usa primero recall_memory (entiende paráfrasis y ambos idiomas) y read_chunk para leer un fragmento. Usa search_code sólo para textos exactos (un identificador, un mensaje literal) y read_file con startLine/endLine cuando necesites un rango concreto.',
+    })
+  }
   const tools = mutationAuthorization.social
     ? []
     : [
       ...READ_TOOLS,
+      ...(holo ? MEMORY_TOOLS : []),
       ...(skills.catalog.length ? [LOAD_SKILL_TOOL] : []),
       ...mutatingTools,
       ...availableMcpTools.map((tool) => tool.definition),
@@ -496,10 +668,15 @@ export async function ask(
   // Evita cerrar el turno cuando el modelo narra que "va a crear" algo pero aún
   // no emitió la tool. Sólo damos ese empujón una vez para no entrar en bucle.
   let nudgedToExecute = false
+  // Respuesta previa al empujón: si tras él no se prepara nada, es la que vale.
+  let textBeforeNudge = ''
   // La verificación de archivos afirmados pide corrección una sola vez por turno.
   let claimsChecked = false
+  // Una respuesta que es una llamada a tool escrita como texto se reintenta una sola vez.
+  let textualCallRetried = false
   const contextSources = contextSourceLabels(ideContext)
   if (recall.text) contextSources.push('memoria automática')
+  if (holo) contextSources.push('memoria holográfica')
   for (const source of steering?.sources || []) contextSources.push(source)
   for (const source of explicitContext?.sources || []) contextSources.push(source)
   for (const source of skills.sources) contextSources.push(source)
@@ -573,7 +750,9 @@ export async function ask(
       return `${call.name} → error: los argumentos llegaron incompletos o con JSON inválido (probablemente por el límite de salida). ` +
         'Reintenta con un archivo por llamada y contenido más acotado.'
     }
-    const cachedResult = readNames.has(call.name)
+    // Una lectura por rango no se sirve desde la memoria de lecturas completas.
+    const rangedRead = call.name === 'read_file' && (call.args?.startLine !== undefined || call.args?.endLine !== undefined)
+    const cachedResult = readNames.has(call.name) && !rangedRead
       ? cachedReadToolResult(index, automaticMemory, call.name, call.args)
       : undefined
     const fromCache = cachedResult !== undefined
@@ -639,6 +818,10 @@ export async function ask(
       pendingCommands.set(proposal.id, proposal)
       return `propose_command(${proposal.command}) → pendiente de aprobación.`
     }
+    if (holoMemory && holo && MEMORY_TOOL_NAMES.has(call.name)) {
+      return runMemoryTool(holoMemory, index, call.name, call.args, usedChunks)
+    }
+    if (rangedRead) return runRangedRead(index, call.args, holo ? holoMemory : undefined, usedChunks)
     if (readNames.has(call.name)) {
       if (cachedResult !== undefined) return cachedResult
       if (call.name === 'investigate_codebase') {
@@ -681,6 +864,18 @@ export async function ask(
       if (signal?.aborted) throw new Error(CANCELLED_ERROR)
       const response = await chatWithTools(settings.provider, messages, tools, requestOptions)
       if (!response.toolCalls.length) {
+        // El modelo escribió una llamada a tool como texto: se le pide una vez que
+        // la ejecute o conteste. Si insiste, no se muestra ese texto al usuario.
+        if (looksLikeTextualToolCall(response.text || '', tools.map((tool) => tool.name))) {
+          if (!textualCallRetried) {
+            textualCallRetried = true
+            onProgress?.('verificación', language === 'en' ? 'the model wrote a tool call as text; retrying' : 'el modelo escribió una tool como texto; reintentando')
+            messages.push({ role: 'assistant', content: language === 'en' ? 'Checking the project.' : 'Reviso el proyecto.' })
+            messages.push({ role: 'user', content: textualToolCallNotice(language) })
+            continue
+          }
+          return complete(textualToolCallFallback(language), [])
+        }
         const fallback = canMutate
           ? parseProposals(response.text)
           : { text: response.text, proposals: [] }
@@ -700,6 +895,7 @@ export async function ask(
         // "lee pero no crea"), lo empujamos una vez a emitir las herramientas.
         if (canMutate && nothingPrepared() && !fallback.proposals.length && !nudgedToExecute && announcesPendingAction(response.text)) {
           nudgedToExecute = true
+          textBeforeNudge = response.text || ''
           messages.push({ role: 'assistant', content: response.text || '(preparando cambios)' })
           messages.push({ role: 'user', content: executeNudge(language) })
           continue
@@ -719,6 +915,12 @@ export async function ask(
           }
         }
 
+        // El empujón no produjo cambios: la respuesta útil era la anterior
+        // ("no hay nada que cambiar" no contesta la pregunta del usuario).
+        if (textBeforeNudge && nothingPrepared() && !fallback.proposals.length) {
+          onStream?.(textBeforeNudge)
+          return complete(textBeforeNudge, [])
+        }
         // El texto ya llegó completo en esta llamada; se emite para la UI.
         if (response.text) onStream?.(response.text)
         return complete(fallback.text, fallback.proposals)
@@ -731,7 +933,7 @@ export async function ask(
           'Revisa qué quedó preparado y completa lo pendiente en llamadas más pequeñas.')
       }
 
-      messages.push({ role: 'assistant', content: assistantTrace(response) })
+      messages.push({ role: 'assistant', content: assistantTrace(response, language) })
       compactToolResults(toolResultMessages, toolResultBudget)
       const remaining = MAX_TOOL_STEPS - step - 1
       const wrapUp = canMutate && remaining <= 2
@@ -739,7 +941,7 @@ export async function ask(
         : ''
       const resultMessage: ChatMessage = {
         role: 'user',
-        content: `RESULTADOS DE HERRAMIENTAS:\n${redactForModel(results.join('\n\n')).slice(0, 60_000)}\n\n${pendingSummary()}\n\n` +
+        content: `${toolRoundHeader(response)}\n${redactForModel(results.join('\n\n')).slice(0, 60_000)}\n\n${pendingSummary()}\n\n` +
           `Continúa. No repitas propuestas salvo para corregirlas. Si ya terminaste, responde con el resumen final sin tools.${wrapUp}`,
       }
       messages.push(resultMessage)
@@ -776,7 +978,72 @@ export async function ask(
     return complete(parsed.text, parsed.proposals)
   } finally {
     await mcp.close()
+    // Plasticidad: lo que el agente leyó en este turno se refuerza y queda asociado entre sí.
+    if (holoMemory && usedChunks.size) holoMemory.reinforce([...usedChunks])
   }
+}
+
+/** Herramientas de la memoria holográfica. */
+function runMemoryTool(
+  memory: HolographicMemory,
+  index: ProjectIndex,
+  name: string,
+  args: Record<string, any>,
+  usedChunks: Set<string>,
+): string {
+  if (name === 'recall_memory') {
+    const query = String(args?.query || '').trim()
+    if (!query) return 'recall_memory → error: falta query.'
+    const hits = memory.recall(query, index, 8)
+    const related = memory.associated(hits)
+    const notes = memory.recallNotes(query, 5)
+    if (!hits.length && !notes.length) return `recall_memory(${query}) → sin resultados; prueba search_code con un término exacto.`
+    const line = (hit: { id: string; path: string; start: number; end: number; signature: string; via?: string }) =>
+      `[${hit.id}] ${hit.path}:${hit.start}-${hit.end} · ${redactForModel(hit.signature)}${hit.via ? ` (${hit.via})` : ''}`
+    return [
+      `recall_memory(${query}) → usa read_chunk(id) para leer uno:`,
+      ...hits.map(line),
+      ...(related.length ? ['Asociados:', ...related.map(line)] : []),
+      ...(notes.length ? ['Notas:', ...notes.map((note) => `- ${note.stale ? '[POSIBLEMENTE OBSOLETA] ' : ''}${redactForModel(note.text)} (fuente: ${note.sources.map((item) => item.path).join(', ') || 'sin fuente'})`)] : []),
+    ].join('\n')
+  }
+  if (name === 'read_chunk') {
+    const id = String(args?.id || '').replace(/^\[|\]$/g, '').trim()
+    const chunk = memory.chunk(id)
+    if (!chunk) return `read_chunk(${id}) → no existe (los ids cambian si el archivo se reestructura); usa recall_memory.`
+    usedChunks.add(chunk.id)
+    const truncated = chunk.text.length >= 6000 ? `\n(recortado; lee el resto con read_file(${chunk.path}, ${chunk.start}, ${chunk.end}))` : ''
+    return `read_chunk(${chunk.id}) → ${chunk.path}:${chunk.start}-${chunk.end} · ${chunk.kind} ${chunk.title}\n\`\`\`\n${redactForModel(chunk.text)}\n\`\`\`${truncated}`
+  }
+  if (name === 'remember') {
+    const note = redactForModel(String(args?.note || '')).trim()
+    if (!note) return 'remember → error: la nota está vacía.'
+    const sources = Array.isArray(args?.sources) ? args.sources.map((item: unknown) => cleanPath(String(item))) : []
+    const saved = memory.learn(note, sources, 'agent')
+    const missing = sources.filter((path: string) => !saved.sources.some((item) => item.path === path))
+    return `remember → nota ${saved.id} guardada${saved.sources.length ? ` (fuente: ${saved.sources.map((item) => item.path).join(', ')})` : ' sin fuente verificable'}.` +
+      (missing.length ? ` Rutas no indexadas, ignoradas: ${missing.join(', ')}.` : '')
+  }
+  return `Herramienta de memoria desconocida: ${name}`
+}
+
+/** read_file con rango de líneas: lee sólo lo pedido y refuerza esos fragmentos. */
+async function runRangedRead(
+  index: ProjectIndex,
+  args: Record<string, any>,
+  memory: HolographicMemory | undefined,
+  usedChunks: Set<string>,
+): Promise<string> {
+  const path = cleanPath(String(args?.path || ''))
+  const content = await index.readFile(path, 400_000)
+  if (content === undefined) return `read_file(${path}) → no existe.`
+  const lines = content.split('\n')
+  const start = Math.max(1, Math.floor(Number(args?.startLine) || 1))
+  const end = Math.min(lines.length, Math.max(start, Math.floor(Number(args?.endLine) || lines.length)))
+  if (start > lines.length) return `read_file(${path}) → el archivo tiene ${lines.length} líneas.`
+  const slice = lines.slice(start - 1, end).join('\n').slice(0, 40_000)
+  for (const chunk of memory?.chunksInRange(path, start, end) || []) usedChunks.add(chunk.id)
+  return `read_file(${path}, líneas ${start}-${end} de ${lines.length}):\n\`\`\`\n${redactForModel(slice)}\n\`\`\``
 }
 
 /** Pasos máximos del bucle de tools antes del cierre forzado. */
@@ -832,14 +1099,52 @@ function closingWithToolsNotice(language: UiLanguage): string {
     : 'Se agotaron los pasos de investigación. Si la tarea requiere cambios, prepáralos ahora con las tools de escritura usando lo que ya sabes y cierra con un resumen breve.'
 }
 
-/** Deja constancia de qué tools se llamaron, para que el modelo no las repita. */
-function assistantTrace(response: ChatResult): string {
+/**
+ * Turno del asistente que acompaña a cada ronda de tools. Antes era
+ * "[tools llamadas: search_code(...)]": algunos modelos (Gemini) copiaban ese
+ * formato como respuesta final en vez de llamar la tool o contestar. Ahora es
+ * prosa que no sirve como plantilla; la lista de llamadas va en el mensaje de
+ * resultados (ver toolRoundHeader).
+ */
+function assistantTrace(response: ChatResult, language: UiLanguage): string {
+  const text = response.text?.trim()
+  if (text) return text
+  return language === 'en' ? 'Checking the project.' : 'Reviso el proyecto.'
+}
+
+/** Encabezado del mensaje de resultados: qué tools se ejecutaron en esta ronda. */
+function toolRoundHeader(response: ChatResult): string {
   const calls = response.toolCalls.map((call) => {
     const detail = describeCall(call.name, call.args)
     return detail ? `${call.name}(${detail})` : call.name
   })
-  const text = response.text?.trim()
-  return [text, `[tools llamadas: ${calls.join(', ')}]`].filter(Boolean).join('\n')
+  return `RESULTADOS DE HERRAMIENTAS (ya ejecutadas: ${calls.join(', ')}):`
+}
+
+/**
+ * Respuesta final que en realidad es una llamada a tool escrita como texto
+ * (p. ej. "[tools llamadas: search_code(x)]" o "search_code(x)") en lugar de
+ * una respuesta para el usuario.
+ */
+export function looksLikeTextualToolCall(text: string, toolNames: string[]): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  if (/^\[?\s*tools? (?:llamadas|called)\s*:/i.test(trimmed)) return true
+  if (trimmed.length > 300) return false
+  const names = toolNames.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  return Boolean(names) && new RegExp(`^\\[?\\s*(?:${names})\\s*\\(`).test(trimmed)
+}
+
+function textualToolCallNotice(language: UiLanguage): string {
+  return language === 'en'
+    ? 'Your last reply was a tool call written as text, which does not run anything and cannot be shown to the user. Either call the tool for real or answer the user now with what you found.'
+    : 'Tu última respuesta fue una llamada a herramienta escrita como texto: no ejecuta nada y no sirve como respuesta. Llama la herramienta de verdad o responde ahora al usuario con lo que encontraste.'
+}
+
+function textualToolCallFallback(language: UiLanguage): string {
+  return language === 'en'
+    ? 'I could not complete the answer: the model returned an internal step instead of a reply. Please ask again.'
+    : 'No pude completar la respuesta: el modelo devolvió un paso interno en lugar de contestar. Vuelve a preguntar.'
 }
 
 /**
